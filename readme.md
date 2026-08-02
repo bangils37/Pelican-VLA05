@@ -75,12 +75,17 @@ and **91.0%** on *RoboTwin Randomized*, the best average among open-source VLA b
 * **[2026-07-08]** The Pelican-VLA 0.5 [technical report](https://arxiv.org/abs/2607.06655)
   is released.
 * **[2026-07-14]** Model weights, inference code, and visualization code are released.
-* **[2026-07-28]** Training code will be open-sourced.
+* **[2026-08-28]** Training code will be open-sourced. The release has been moved from
+  July 28 to August 28: the team is currently occupied with real-robot motion work and with
+  the **World Robot Conference (WRC)**, where we are preparing a live Pelican-VLA 0.5 demo.
+  Together with the training code, we will also release the data collected for that demo.
 
 ## TODO
 
 * [x] **July 14, 2026:** release the model weights, inference code, and visualization code.
-* [ ] **July 28, 2026:** open-source the training code.
+* [ ] **August 28, 2026:** open-source the training code (rescheduled from July 28 due to
+  real-robot motion work and WRC preparation).
+* [ ] **August 28, 2026:** release the data collected for the Pelican-VLA 0.5 WRC demo.
 
 ## Visualization and Reproducibility
 
@@ -99,9 +104,12 @@ as it is packaged as a [LeRobot 3.0](https://github.com/huggingface/lerobot) dat
 [*Visualize on your own collected data*](attention_vis/README.md#visualize-on-your-own-collected-data)
 for how to register your recording and dump its attention.
 
-We also commit that **RoboTwin data was not used during pre-training**. On July 28, 2026,
+We also commit that **RoboTwin data was not used during pre-training**. On August 28, 2026,
 we will release the training code so the community can train the model and reproduce the
-RoboTwin zero-shot evaluation.
+RoboTwin zero-shot evaluation. This date was pushed back from July 28 because the team is
+currently focused on real-robot motion work and on preparing a Pelican-VLA 0.5 demo for the
+World Robot Conference (WRC); the data collected for that demo will be released alongside
+the training code.
 
 ## Model Download
 
