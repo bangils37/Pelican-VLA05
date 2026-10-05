@@ -6,7 +6,9 @@ Supports:
 - bfloat16 mixed precision
 - Freezing backbone (action head + bottleneck fine-tuning) or full fine-tuning
 - LeRobot v2.1/v3 formatted datasets
-- Checkpointing compatible with Pelican-VLA inference
+- Formal episode-level Train/Validation splitting and validation loss evaluation
+- Checkpointing compatible with Pelican-VLA inference (including best_model tracking)
+- TensorBoard and Weights & Biases (W&B) logging
 """
 
 from __future__ import annotations
@@ -14,9 +16,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
-import sys
 from pathlib import Path
+import sys
+import os
 
 import torch
 import torch.distributed as dist
@@ -28,6 +30,8 @@ from tqdm import tqdm
 # Ensure src/ packages are available
 _ROOT = Path(__file__).resolve().parent.parent
 _SRC = _ROOT / "pelican_vla0.5_infer" / "src"
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
@@ -56,7 +60,7 @@ def parse_args():
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="/home/anhnb9/Documents/datasets/astri_making_coffee_v21",
+        default="/home/aitt/data/serving_brewed_coffee_lrb_annotated",
         help="Path to LeRobot dataset directory",
     )
     parser.add_argument(
@@ -88,27 +92,25 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=2.5e-5, help="Peak learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay")
     parser.add_argument("--warmup_steps", type=int, default=500, help="LR warmup steps")
-    parser.add_argument("--max_steps", type=int, default=10000, help="Total training steps")
+    parser.add_argument("--max_steps", type=int, default=5000, help="Total training steps")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--grad_clip_norm", type=float, default=1.0, help="Max gradient norm")
-    parser.add_argument("--save_steps", type=int, default=1000, help="Save checkpoint every N steps")
+    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every N steps")
     parser.add_argument("--log_steps", type=int, default=10, help="Log metrics every N steps")
+    parser.add_argument("--eval_steps", type=int, default=250, help="Evaluate validation loss every N steps")
+    parser.add_argument("--eval_batches", type=int, default=50, help="Number of val batches to evaluate per eval")
+    parser.add_argument("--val_ratio", type=float, default=0.05, help="Ratio of held-out episodes for validation")
     parser.add_argument("--freeze_backbone", action="store_true", help="Freeze Qwen3-VL backbone (fine-tune heads only)")
     parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
-    parser.add_argument("--wandb_project", type=str, default="pelican-vla-training", help="WandB project name")
+    parser.add_argument("--wandb_project", type=str, default="astribot_making_coffee", help="WandB project name")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="WandB run name")
     return parser.parse_args()
 
 
 def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelicanDataset, is_best: bool = False):
     """Save checkpoint in native Pelican-VLA format."""
-    save_dir = output_dir / f"checkpoint-{step:06d}"
-    save_dir.mkdir(parents=True, exist_ok=True)
-
     unwrapped = policy.module if isinstance(policy, DDP) else policy
-    unwrapped.save_pretrained(str(save_dir))
 
-    # Save dataset stats for inference engine
     stats = {}
     if dataset.state_mean is not None and dataset.action_mean is not None:
         stats = {
@@ -121,12 +123,16 @@ def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelican
                 "std": dataset.action_std.tolist(),
             },
         }
-        with open(save_dir / "stats.json", "w", encoding="utf-8") as f:
-            json.dump(stats, f, indent=2)
 
-    logging.info(f"Saved checkpoint to {save_dir}")
-
-    if is_best:
+    if not is_best:
+        save_dir = output_dir / f"checkpoint-{step:06d}"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        unwrapped.save_pretrained(str(save_dir))
+        if stats:
+            with open(save_dir / "stats.json", "w", encoding="utf-8") as f:
+                json.dump(stats, f, indent=2)
+        logging.info(f"Saved regular checkpoint to {save_dir}")
+    else:
         best_dir = output_dir / "best_model"
         best_dir.mkdir(parents=True, exist_ok=True)
         unwrapped.save_pretrained(str(best_dir))
@@ -134,6 +140,41 @@ def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelican
             with open(best_dir / "stats.json", "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
         logging.info(f"Updated best model at {best_dir}")
+
+
+def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=False, world_size=1):
+    """Run validation evaluation loop."""
+    policy.eval()
+    val_loss_accum = 0.0
+    val_loss_dict = {}
+    batches_run = 0
+
+    with torch.no_grad():
+        for i, batch in enumerate(val_dataloader):
+            if max_batches > 0 and i >= max_batches:
+                break
+            batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                loss, loss_dict = policy(batch, current_step=0)
+
+            val_loss_accum += loss.item()
+            for k, v in loss_dict.items():
+                if isinstance(v, (int, float)):
+                    val_loss_dict[k] = val_loss_dict.get(k, 0.0) + v
+            batches_run += 1
+
+    if batches_run > 0:
+        val_loss_accum /= batches_run
+        for k in val_loss_dict:
+            val_loss_dict[k] /= batches_run
+
+    if is_distributed:
+        loss_tensor = torch.tensor([val_loss_accum], device=device)
+        dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+        val_loss_accum = loss_tensor.item() / world_size
+
+    policy.train()
+    return val_loss_accum, val_loss_dict
 
 
 def main():
@@ -144,7 +185,8 @@ def main():
     # Configure logging
     logging.basicConfig(
         format=f"[Rank {rank}] %(asctime)s - %(levelname)s - %(message)s",
-        level=logging.INFO if is_main_process else logging.WARNING,
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=logging.INFO if is_main_process else logging.WARN,
     )
 
     if args.cosmos_tokenizer_path:
@@ -157,34 +199,63 @@ def main():
     if is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Dataset & DataLoader
+    # 1. Dataset & DataLoader (Train & Validation Splits)
     camera_map = {
         "cam_head": "image0",
         "cam_left_wrist": "image1",
         "cam_right_wrist": "image2",
     }
-    dataset = LeRobotPelicanDataset(
+    
+    if is_main_process:
+        logging.info(f"Loading datasets with {args.val_ratio * 100:.1f}% validation split...")
+
+    train_dataset = LeRobotPelicanDataset(
         dataset_root=args.dataset_path,
         camera_map=camera_map,
         chunk_size=50,
-        future_horizon=25,
+        future_horizon=15,
         qwen3_vl_path=args.qwen3_vl_path,
+        split="train",
+        val_ratio=args.val_ratio,
+    )
+    val_dataset = LeRobotPelicanDataset(
+        dataset_root=args.dataset_path,
+        camera_map=camera_map,
+        chunk_size=50,
+        future_horizon=15,
+        qwen3_vl_path=args.qwen3_vl_path,
+        split="val",
+        val_ratio=args.val_ratio,
+        _shared_data=train_dataset.get_shared_data(),
     )
 
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
-    dataloader = DataLoader(
-        dataset,
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
-        shuffle=(sampler is None),
-        sampler=sampler,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=args.num_workers,
         collate_fn=collate_pelican_batch,
         pin_memory=True,
         drop_last=True,
     )
 
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if is_distributed else None
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        sampler=val_sampler,
+        num_workers=max(1, args.num_workers // 2),
+        collate_fn=collate_pelican_batch,
+        pin_memory=True,
+        drop_last=False,
+    )
+
     if is_main_process:
-        logging.info(f"Loaded dataset from {args.dataset_path} with {len(dataset)} samples.")
+        logging.info(f"Train samples: {len(train_dataset)} ({len(train_dataset.active_episodes_set)} episodes)")
+        logging.info(f"Val samples:   {len(val_dataset)} ({len(val_dataset.active_episodes_set)} episodes)")
         logging.info(f"World size: {world_size}, Batch size per GPU: {args.batch_size}, Effective batch size: {args.batch_size * world_size * args.gradient_accumulation_steps}")
 
     # 2. Model
@@ -246,11 +317,11 @@ def main():
 
     # 5. Training loop
     global_step = 0
-    best_loss = float("inf")
+    best_val_loss = float("inf")
     policy.train()
 
     pbar = tqdm(total=args.max_steps, desc="Training Pelican-VLA", disable=not is_main_process)
-    data_iter = iter(dataloader)
+    data_iter = iter(train_dataloader)
 
     while global_step < args.max_steps:
         optimizer.zero_grad()
@@ -261,9 +332,9 @@ def main():
             try:
                 batch = next(data_iter)
             except StopIteration:
-                if sampler is not None:
-                    sampler.set_epoch(global_step)
-                data_iter = iter(dataloader)
+                if train_sampler is not None:
+                    train_sampler.set_epoch(global_step)
+                data_iter = iter(train_dataloader)
                 batch = next(data_iter)
 
             # Move batch to device
@@ -289,7 +360,7 @@ def main():
         global_step += 1
         pbar.update(1)
 
-        # Logging
+        # Logging (Train metrics)
         if global_step % args.log_steps == 0 and is_main_process:
             current_lr = scheduler.get_last_lr()[0]
             log_str = f"Step {global_step}/{args.max_steps} | Loss: {accum_loss:.4f} | LR: {current_lr:.2e}"
@@ -308,18 +379,56 @@ def main():
 
             if args.use_wandb:
                 import wandb
-                wandb.log({"train/loss": accum_loss, "train/lr": current_lr, **{f"train/{k}": v for k, v in accum_loss_dict.items()}}, step=global_step)
+                wandb.log({
+                    "train/loss": accum_loss,
+                    "train/lr": current_lr,
+                    **{f"train/{k}": v for k, v in accum_loss_dict.items()}
+                }, step=global_step)
 
-        # Checkpointing
+        # Validation Loss Evaluation
+        if (global_step % args.eval_steps == 0 or global_step == 1) and len(val_dataset) > 0:
+            val_loss, val_loss_dict = evaluate(
+                policy,
+                val_dataloader,
+                device,
+                max_batches=args.eval_batches,
+                is_distributed=is_distributed,
+                world_size=world_size,
+            )
+            if is_main_process:
+                val_log_str = f" >>> EVAL [Step {global_step}] Val Loss: {val_loss:.4f}"
+                if "loss_action" in val_loss_dict:
+                    val_log_str += f" | Val Act: {val_loss_dict['loss_action']:.4f}"
+                if "loss_gen" in val_loss_dict:
+                    val_log_str += f" | Val Gen: {val_loss_dict['loss_gen']:.4f}"
+                logging.info(val_log_str)
+
+                if tb_writer:
+                    tb_writer.add_scalar("val/loss", val_loss, global_step)
+                    for k, v in val_loss_dict.items():
+                        if isinstance(v, (int, float)):
+                            tb_writer.add_scalar(f"val/{k}", v, global_step)
+
+                if args.use_wandb:
+                    import wandb
+                    wandb.log({
+                        "val/loss": val_loss,
+                        **{f"val/{k}": v for k, v in val_loss_dict.items()}
+                    }, step=global_step)
+
+                # Check and save best model
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    logging.info(f"New BEST validation loss: {best_val_loss:.4f}! Saving best_model...")
+                    save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=True)
+
+        # Regular Checkpointing
         if global_step % args.save_steps == 0 and is_main_process:
-            is_best = accum_loss < best_loss
-            if is_best:
-                best_loss = accum_loss
-            save_checkpoint(policy, output_dir, global_step, dataset, is_best=is_best)
+            save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=False)
 
     # Final save
     if is_main_process:
-        save_checkpoint(policy, output_dir, global_step, dataset, is_best=(accum_loss < best_loss))
+        save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=False)
         logging.info("Training completed successfully!")
         if tb_writer:
             tb_writer.close()

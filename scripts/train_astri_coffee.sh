@@ -28,6 +28,11 @@ WARMUP_STEPS=${WARMUP_STEPS:-500}
 SAVE_STEPS=${SAVE_STEPS:-500}
 LOG_STEPS=${LOG_STEPS:-10}
 
+# Validation Hyperparameters
+VAL_RATIO=${VAL_RATIO:-0.05}     # 5% held-out episodes for validation (~20 episodes)
+EVAL_STEPS=${EVAL_STEPS:-250}    # Evaluate val loss every 250 steps
+EVAL_BATCHES=${EVAL_BATCHES:-50} # Batches to evaluate per validation run
+
 # Weights & Biases (W&B) Logging
 USE_WANDB=${USE_WANDB:-1}        # 1 to enable W&B, 0 to disable
 WANDB_PROJECT=${WANDB_PROJECT:-"astribot_making_coffee"}
@@ -48,6 +53,7 @@ echo "Number of GPUs:    $NUM_GPUS"
 echo "Batch Size / GPU:  $BATCH_SIZE"
 echo "Max Steps:         $MAX_STEPS"
 echo "Learning Rate:     $LR"
+echo "Validation Split:  ${VAL_RATIO} (Eval every ${EVAL_STEPS} steps, ${EVAL_BATCHES} batches)"
 echo "W&B Tracking:      Enabled ($WANDB_PROJECT / $WANDB_RUN_NAME)"
 echo "=========================================================="
 
@@ -69,6 +75,9 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --max_steps "$MAX_STEPS" \
         --save_steps "$SAVE_STEPS" \
         --log_steps "$LOG_STEPS" \
+        --val_ratio "$VAL_RATIO" \
+        --eval_steps "$EVAL_STEPS" \
+        --eval_batches "$EVAL_BATCHES" \
         $WANDB_ARGS
 else
     echo "Running Single-GPU Full Fine-Tuning on GPU $GPU_ID..."
@@ -83,5 +92,8 @@ else
         --max_steps "$MAX_STEPS" \
         --save_steps "$SAVE_STEPS" \
         --log_steps "$LOG_STEPS" \
+        --val_ratio "$VAL_RATIO" \
+        --eval_steps "$EVAL_STEPS" \
+        --eval_batches "$EVAL_BATCHES" \
         $WANDB_ARGS
 fi

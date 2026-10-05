@@ -1,4 +1,11 @@
-"""Dataset loader for Pelican-VLA 0.5 compatible with LeRobot v2.1 and v3.0 datasets."""
+"""Dataset loader for Pelican-VLA 0.5 compatible with LeRobot v2.1 and v3.0 datasets.
+
+Supports:
+  - Episode-level train/validation split (preventing data leakage across frames)
+  - LeRobot v3.0 chunked video decoding
+  - Subtask-conditioned language instructions
+  - In-memory tensor caching for high-throughput training
+"""
 
 from __future__ import annotations
 
@@ -27,6 +34,7 @@ class LeRobotPelicanDataset(Dataset):
       - Action chunk from t to t + chunk_size: [chunk_size, 32] (normalized and padded to 32 dimensions)
       - Task / subtask instruction text
       - Normalized state and action using dataset stats
+      - Episode-level train/validation splitting
     """
 
     def __init__(
@@ -41,6 +49,10 @@ class LeRobotPelicanDataset(Dataset):
         image_size: tuple[int, int] = (224, 224),
         pad_dim: int = 32,
         use_subtasks_prob: float = 0.5,
+        split: str = "train",  # "train", "val", or "all"
+        val_ratio: float = 0.05,  # Ratio of held-out episodes for validation
+        seed: int = 42,
+        _shared_data: dict | None = None,
     ):
         super().__init__()
         self.root = Path(dataset_root).expanduser().resolve()
@@ -49,6 +61,7 @@ class LeRobotPelicanDataset(Dataset):
         self.image_size = image_size
         self.pad_dim = pad_dim
         self.use_subtasks_prob = use_subtasks_prob
+        self.split = split.lower()
 
         # Load info.json
         info_path = self.root / "meta" / "info.json"
@@ -124,31 +137,52 @@ class LeRobotPelicanDataset(Dataset):
         else:
             raise FileNotFoundError(f"Neither {episodes_parquet} nor {episodes_jsonl} was found.")
 
-        # Load primary data parquet table into memory
-        data_parquet_v3 = self.root / "data" / "chunk-000" / "file-000.parquet"
-        if data_parquet_v3.is_file():
-            data_tbl = pq.read_table(
-                data_parquet_v3,
-                columns=["observation.state", "action", "task_index", "subtask_index"]
-                if "subtask_index" in pq.read_schema(data_parquet_v3).names
-                else ["observation.state", "action", "task_index"],
-            )
-            self.raw_states = np.stack(data_tbl["observation.state"].to_numpy()).astype(np.float32)
-            self.raw_actions = np.stack(data_tbl["action"].to_numpy()).astype(np.float32)
-            self.task_indices = data_tbl["task_index"].to_numpy().astype(np.int64)
-            if "subtask_index" in data_tbl.column_names:
-                self.subtask_indices = data_tbl["subtask_index"].to_numpy().astype(np.int64)
-            else:
-                self.subtask_indices = None
+        # Episode-level train/validation split
+        total_eps = len(self.episodes)
+        if val_ratio > 0.0 and self.split in ["train", "val"]:
+            rng = np.random.RandomState(seed)
+            shuffled_eps = rng.permutation(total_eps).tolist()
+            n_val = max(1, int(round(total_eps * val_ratio)))
+            val_eps_set = set(shuffled_eps[:n_val])
+            train_eps_set = set(shuffled_eps[n_val:])
+            self.active_episodes_set = val_eps_set if self.split == "val" else train_eps_set
+        else:
+            self.active_episodes_set = set(range(total_eps))
+
+        # Load primary data parquet table into memory (or reuse shared cache)
+        if _shared_data is not None:
+            self.raw_states = _shared_data["raw_states"]
+            self.raw_actions = _shared_data["raw_actions"]
+            self.task_indices = _shared_data["task_indices"]
+            self.subtask_indices = _shared_data["subtask_indices"]
             self._use_in_memory_data = True
         else:
-            self._use_in_memory_data = False
-            self._parquet_cache = {}
+            data_parquet_v3 = self.root / "data" / "chunk-000" / "file-000.parquet"
+            if data_parquet_v3.is_file():
+                data_tbl = pq.read_table(
+                    data_parquet_v3,
+                    columns=["observation.state", "action", "task_index", "subtask_index"]
+                    if "subtask_index" in pq.read_schema(data_parquet_v3).names
+                    else ["observation.state", "action", "task_index"],
+                )
+                self.raw_states = np.stack(data_tbl["observation.state"].to_numpy()).astype(np.float32)
+                self.raw_actions = np.stack(data_tbl["action"].to_numpy()).astype(np.float32)
+                self.task_indices = data_tbl["task_index"].to_numpy().astype(np.int64)
+                if "subtask_index" in data_tbl.column_names:
+                    self.subtask_indices = data_tbl["subtask_index"].to_numpy().astype(np.int64)
+                else:
+                    self.subtask_indices = None
+                self._use_in_memory_data = True
+            else:
+                self._use_in_memory_data = False
+                self._parquet_cache = {}
 
         # Build index map: list of (global_row_idx, episode_idx, frame_in_ep, ep_len, ep_start_idx)
         self.samples = []
         for ep in self.episodes:
             ep_idx = int(ep["episode_index"])
+            if ep_idx not in self.active_episodes_set:
+                continue
             ep_len = int(ep["length"])
             ep_start_idx = int(ep.get("dataset_from_index", 0))
             for frame_idx in range(ep_len):
@@ -163,6 +197,17 @@ class LeRobotPelicanDataset(Dataset):
 
         # Cache open video readers: key=(cam_name, file_idx) -> VideoReader
         self._video_readers = {}
+
+    def get_shared_data(self) -> dict:
+        """Export in-memory arrays to quickly initialize validation dataset without re-reading disks."""
+        if not self._use_in_memory_data:
+            return {}
+        return {
+            "raw_states": self.raw_states,
+            "raw_actions": self.raw_actions,
+            "task_indices": self.task_indices,
+            "subtask_indices": self.subtask_indices,
+        }
 
     def _load_stats(self):
         stats_json = self.root / "meta" / "stats.json"
