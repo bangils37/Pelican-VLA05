@@ -33,3 +33,7 @@ pretrained_model/
 .DS_Store
 .vscode/
 .idea/
+
+# --- wandb & logs ---
+wandb/
+*.log

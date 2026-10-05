@@ -9,6 +9,8 @@ Supports:
 
 from __future__ import annotations
 
+from collections import OrderedDict
+import gc
 import json
 from pathlib import Path
 import random
@@ -52,6 +54,7 @@ class LeRobotPelicanDataset(Dataset):
         split: str = "train",  # "train", "val", or "all"
         val_ratio: float = 0.05,  # Ratio of held-out episodes for validation
         seed: int = 42,
+        max_video_readers: int = 6,
         _shared_data: dict | None = None,
     ):
         super().__init__()
@@ -195,8 +198,9 @@ class LeRobotPelicanDataset(Dataset):
             max_length=max_length,
         )
 
-        # Cache open video readers: key=(cam_name, file_idx) -> VideoReader
-        self._video_readers = {}
+        # Cache open video readers: LRU cache key=(cam_name, file_idx) -> VideoReader
+        self._video_readers = OrderedDict()
+        self.max_video_readers = max_video_readers
 
     def get_shared_data(self) -> dict:
         """Export in-memory arrays to quickly initialize validation dataset without re-reading disks."""
@@ -246,12 +250,21 @@ class LeRobotPelicanDataset(Dataset):
             file_idx = int(ep_dict.get(file_idx_key, 0))
             cache_key = (cam_name, file_idx)
 
-            if cache_key not in self._video_readers:
+            if cache_key in self._video_readers:
+                self._video_readers.move_to_end(cache_key)
+            else:
                 video_path = self.root / "videos" / cam_key / "chunk-000" / f"file-{file_idx:03d}.mp4"
                 if not video_path.is_file():
                     video_path = self.root / "videos" / cam_name / "chunk-000" / f"file-{file_idx:03d}.mp4"
                 if not video_path.is_file():
                     return None, 0
+
+                # Evict oldest VideoReader if cache limit reached
+                if len(self._video_readers) >= self.max_video_readers:
+                    _, old_vr = self._video_readers.popitem(last=False)
+                    del old_vr
+                    gc.collect()
+
                 try:
                     self._video_readers[cache_key] = VideoReader(str(video_path), ctx=cpu(0))
                 except Exception:
@@ -266,12 +279,21 @@ class LeRobotPelicanDataset(Dataset):
         else:
             ep_idx = int(ep_dict["episode_index"])
             cache_key = (cam_name, ep_idx)
-            if cache_key not in self._video_readers:
+            if cache_key in self._video_readers:
+                self._video_readers.move_to_end(cache_key)
+            else:
                 video_path = self.root / "videos" / "chunk-000" / f"observation.images.{cam_name}" / f"episode_{ep_idx:06d}.mp4"
                 if not video_path.is_file():
                     video_path = self.root / "videos" / "chunk-000" / cam_name / f"episode_{ep_idx:06d}.mp4"
                 if not video_path.is_file():
                     return None, 0
+
+                # Evict oldest VideoReader if cache limit reached
+                if len(self._video_readers) >= self.max_video_readers:
+                    _, old_vr = self._video_readers.popitem(last=False)
+                    del old_vr
+                    gc.collect()
+
                 try:
                     self._video_readers[cache_key] = VideoReader(str(video_path), ctx=cpu(0))
                 except Exception:

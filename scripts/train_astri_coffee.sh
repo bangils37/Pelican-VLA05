@@ -18,10 +18,19 @@ DATASET_PATH="/home/aitt/data/serving_brewed_coffee_lrb_annotated"
 PRETRAINED_MODEL="$PROJECT_ROOT/pretrained_model/pelican_vla05"
 OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee_full_ft"
 
+# GPU Isolation (Default to GPUs 1,2,3 to preserve GPU 0 for Desktop/Display)
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"1,2,3"}
+
+# If NUM_GPUS is not set, count number of comma-separated GPUs in CUDA_VISIBLE_DEVICES
+if [ -z "$NUM_GPUS" ]; then
+    NUM_GPUS=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | grep -v '^$' | wc -l)
+fi
+
 # Training Hyperparameters
-NUM_GPUS=${NUM_GPUS:-4}          # Default to 4 GPUs for Full Fine-Tuning
 GPU_ID=${GPU_ID:-0}              # Used when NUM_GPUS=1
-BATCH_SIZE=${BATCH_SIZE:-4}      # Per GPU batch size (4 * 4 = 16 effective batch)
+BATCH_SIZE=${BATCH_SIZE:-4}      # Per GPU batch size
+NUM_WORKERS=${NUM_WORKERS:-2}    # DataLoader workers per GPU (memory-safe)
+MAX_VIDEO_READERS=${MAX_VIDEO_READERS:-6} # Max open VideoReaders per worker
 MAX_STEPS=${MAX_STEPS:-5000}     # Total training steps
 LR=${LR:-2.5e-5}                 # Peak learning rate
 WARMUP_STEPS=${WARMUP_STEPS:-500}
@@ -45,16 +54,18 @@ fi
 
 echo "=========================================================="
 echo "Starting Pelican-VLA 0.5 FULL FINE-TUNING"
-echo "Project Root:      $PROJECT_ROOT"
-echo "Dataset Path:      $DATASET_PATH"
-echo "Pretrained Model:  $PRETRAINED_MODEL"
-echo "Output Directory:  $OUTPUT_DIR"
-echo "Number of GPUs:    $NUM_GPUS"
-echo "Batch Size / GPU:  $BATCH_SIZE"
-echo "Max Steps:         $MAX_STEPS"
-echo "Learning Rate:     $LR"
-echo "Validation Split:  ${VAL_RATIO} (Eval every ${EVAL_STEPS} steps, ${EVAL_BATCHES} batches)"
-echo "W&B Tracking:      Enabled ($WANDB_PROJECT / $WANDB_RUN_NAME)"
+echo "Project Root:         $PROJECT_ROOT"
+echo "Dataset Path:         $DATASET_PATH"
+echo "Pretrained Model:     $PRETRAINED_MODEL"
+echo "Output Directory:     $OUTPUT_DIR"
+echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+echo "Number of GPUs:       $NUM_GPUS"
+echo "Workers / GPU:        $NUM_WORKERS (Max Video Readers: $MAX_VIDEO_READERS)"
+echo "Batch Size / GPU:     $BATCH_SIZE"
+echo "Max Steps:            $MAX_STEPS"
+echo "Learning Rate:        $LR"
+echo "Validation Split:     ${VAL_RATIO} (Eval every ${EVAL_STEPS} steps, ${EVAL_BATCHES} batches)"
+echo "W&B Tracking:         Enabled ($WANDB_PROJECT / $WANDB_RUN_NAME)"
 echo "=========================================================="
 
 mkdir -p "$OUTPUT_DIR"
@@ -70,6 +81,8 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --cosmos_tokenizer_path "$COSMOS_TOKENIZER_PATH" \
         --output_dir "$OUTPUT_DIR" \
         --batch_size "$BATCH_SIZE" \
+        --num_workers "$NUM_WORKERS" \
+        --max_video_readers "$MAX_VIDEO_READERS" \
         --learning_rate "$LR" \
         --warmup_steps "$WARMUP_STEPS" \
         --max_steps "$MAX_STEPS" \
@@ -87,6 +100,8 @@ else
         --cosmos_tokenizer_path "$COSMOS_TOKENIZER_PATH" \
         --output_dir "$OUTPUT_DIR" \
         --batch_size "$BATCH_SIZE" \
+        --num_workers "$NUM_WORKERS" \
+        --max_video_readers "$MAX_VIDEO_READERS" \
         --learning_rate "$LR" \
         --warmup_steps "$WARMUP_STEPS" \
         --max_steps "$MAX_STEPS" \

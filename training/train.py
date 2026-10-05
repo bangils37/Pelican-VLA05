@@ -20,7 +20,9 @@ from pathlib import Path
 import sys
 import os
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
@@ -88,7 +90,8 @@ def parse_args():
         help="Local dir or HF id for Qwen3-VL weights",
     )
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size per GPU")
-    parser.add_argument("--num_workers", type=int, default=4, help="DataLoader workers per GPU")
+    parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers per GPU")
+    parser.add_argument("--max_video_readers", type=int, default=6, help="Max open VideoReader instances per DataLoader worker")
     parser.add_argument("--learning_rate", type=float, default=2.5e-5, help="Peak learning rate")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="AdamW weight decay")
     parser.add_argument("--warmup_steps", type=int, default=500, help="LR warmup steps")
@@ -142,7 +145,46 @@ def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelican
         logging.info(f"Updated best model at {best_dir}")
 
 
-def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=False, world_size=1, current_step=10000):
+def compute_batch_action_mse(policy, batch, action_mean=None, action_std=None):
+    """Compute Action MSE Error between predicted trajectory and ground truth actions."""
+    raw_policy = policy.module if isinstance(policy, DDP) else policy
+    orig_mode = raw_policy.training
+    raw_policy.eval()
+    try:
+        with torch.no_grad():
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                pred_actions, _ = raw_policy.predict_action_chunk(batch)
+            orig_dim = raw_policy.config.output_features["action"].shape[0]
+            gt_actions = batch["action"][:, :, :orig_dim]
+
+            if action_mean is not None and action_std is not None:
+                mean_t = torch.as_tensor(action_mean, device=pred_actions.device, dtype=pred_actions.dtype)[:orig_dim]
+                std_t = torch.as_tensor(action_std, device=pred_actions.device, dtype=pred_actions.dtype)[:orig_dim]
+                unnorm_pred = pred_actions * std_t + mean_t
+                unnorm_gt = gt_actions * std_t + mean_t
+                mse = F.mse_loss(unnorm_pred, unnorm_gt).item()
+            else:
+                mse = F.mse_loss(pred_actions, gt_actions).item()
+            return mse
+    except Exception as e:
+        logging.warning(f"Failed to compute action MSE error: {e}")
+        return 0.0
+    finally:
+        if orig_mode:
+            raw_policy.train()
+
+
+def evaluate(
+    policy,
+    val_dataloader,
+    device,
+    max_batches=50,
+    is_distributed=False,
+    world_size=1,
+    current_step=10000,
+    action_mean=None,
+    action_std=None,
+):
     """Run validation evaluation loop.
     
     Args:
@@ -153,6 +195,7 @@ def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=Fals
     val_loss_accum = 0.0
     val_loss_dict = {}
     batches_run = 0
+    val_action_mses = []
 
     with torch.no_grad():
         for i, batch in enumerate(val_dataloader):
@@ -166,6 +209,12 @@ def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=Fals
             for k, v in loss_dict.items():
                 if isinstance(v, (int, float)):
                     val_loss_dict[k] = val_loss_dict.get(k, 0.0) + v
+
+            # Compute action MSE on first 3 val batches
+            if i < 3:
+                mse = compute_batch_action_mse(policy, batch, action_mean, action_std)
+                val_action_mses.append(mse)
+
             batches_run += 1
 
     if batches_run > 0:
@@ -173,12 +222,15 @@ def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=Fals
         for k in val_loss_dict:
             val_loss_dict[k] /= batches_run
 
+    val_action_mse = float(np.mean(val_action_mses)) if val_action_mses else 0.0
+
     # In distributed mode: sync val loss AND every sub-loss across all GPUs
     if is_distributed:
-        # Sync main loss
-        loss_tensor = torch.tensor([val_loss_accum], device=device)
+        # Sync main loss and action MSE
+        loss_tensor = torch.tensor([val_loss_accum, val_action_mse], device=device)
         dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
-        val_loss_accum = loss_tensor.item() / world_size
+        val_loss_accum = loss_tensor[0].item() / world_size
+        val_action_mse = loss_tensor[1].item() / world_size
 
         # Sync each sub-loss in val_loss_dict
         keys = sorted(val_loss_dict.keys())
@@ -189,7 +241,7 @@ def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=Fals
                 val_loss_dict[k] = values_tensor[i].item() / world_size
 
     policy.train()
-    return val_loss_accum, val_loss_dict
+    return val_loss_accum, val_loss_dict, val_action_mse
 
 
 def main():
@@ -232,6 +284,7 @@ def main():
         qwen3_vl_path=args.qwen3_vl_path,
         split="train",
         val_ratio=args.val_ratio,
+        max_video_readers=args.max_video_readers,
     )
     val_dataset = LeRobotPelicanDataset(
         dataset_root=args.dataset_path,
@@ -241,6 +294,7 @@ def main():
         qwen3_vl_path=args.qwen3_vl_path,
         split="val",
         val_ratio=args.val_ratio,
+        max_video_readers=args.max_video_readers,
         _shared_data=train_dataset.get_shared_data(),
     )
 
@@ -378,7 +432,8 @@ def main():
         # Logging (Train metrics)
         if global_step % args.log_steps == 0 and is_main_process:
             current_lr = scheduler.get_last_lr()[0]
-            log_str = f"Step {global_step}/{args.max_steps} | Loss: {accum_loss:.4f} | LR: {current_lr:.2e}"
+            current_epoch = round((global_step * world_size * args.batch_size) / len(train_dataset), 2)
+            log_str = f"Step {global_step}/{args.max_steps} (Epoch {current_epoch}) | Loss: {accum_loss:.4f} | LR: {current_lr:.2e}"
             if "loss_action" in accum_loss_dict:
                 log_str += f" | Act: {accum_loss_dict['loss_action']:.4f}"
             if "loss_gen" in accum_loss_dict:
@@ -386,33 +441,53 @@ def main():
             pbar.set_postfix_str(log_str)
 
             if tb_writer:
-                tb_writer.add_scalar("train/loss", accum_loss, global_step)
-                tb_writer.add_scalar("train/lr", current_lr, global_step)
-                for k, v in accum_loss_dict.items():
-                    if isinstance(v, (int, float)):
-                        tb_writer.add_scalar(f"train/{k}", v, global_step)
+                tb_writer.add_scalar("train_loss", accum_loss, global_step)
+                tb_writer.add_scalar("lr", current_lr, global_step)
+                if "loss_action" in accum_loss_dict:
+                    tb_writer.add_scalar("loss_action", accum_loss_dict["loss_action"], global_step)
+                if "loss_gen" in accum_loss_dict:
+                    tb_writer.add_scalar("loss_gen", accum_loss_dict["loss_gen"], global_step)
 
             if args.use_wandb:
                 import wandb
-                wandb.log({
-                    "train/loss": accum_loss,
-                    "train/lr": current_lr,
-                    **{f"train/{k}": v for k, v in accum_loss_dict.items()}
-                }, step=global_step)
+                # Diffusion-Policy-compatible format: clean top-level metrics, no individual dim0..13 clutter
+                wandb_payload = {
+                    "train_loss": accum_loss,
+                    "lr": current_lr,
+                    "epoch": current_epoch,
+                    "global_step": global_step,
+                }
+                if "loss_action" in accum_loss_dict:
+                    wandb_payload["loss_action"] = accum_loss_dict["loss_action"]
+                if "loss_gen" in accum_loss_dict:
+                    wandb_payload["loss_gen"] = accum_loss_dict["loss_gen"]
+                wandb.log(wandb_payload, step=global_step)
 
         # Validation Loss Evaluation
         if (global_step % args.eval_steps == 0 or global_step == 1) and len(val_dataset) > 0:
-            val_loss, val_loss_dict = evaluate(
+            val_loss, val_loss_dict, val_action_mse = evaluate(
                 policy,
                 val_dataloader,
                 device,
                 max_batches=args.eval_batches,
                 is_distributed=is_distributed,
                 world_size=world_size,
-                current_step=global_step,  # pass real step so bottleneck warmup is correct
+                current_step=global_step,
+                action_mean=train_dataset.action_mean,
+                action_std=train_dataset.action_std,
             )
+
+            # Compute train_action_mse_error on current training batch
+            train_action_mse = compute_batch_action_mse(
+                policy,
+                batch,
+                action_mean=train_dataset.action_mean,
+                action_std=train_dataset.action_std,
+            )
+
             if is_main_process:
-                val_log_str = f" >>> EVAL [Step {global_step}] Val Loss: {val_loss:.4f}"
+                current_epoch = round((global_step * world_size * args.batch_size) / len(train_dataset), 2)
+                val_log_str = f" >>> EVAL [Step {global_step}] Val Loss: {val_loss:.4f} | Train Act MSE: {train_action_mse:.4f} | Val Act MSE: {val_action_mse:.4f}"
                 if "loss_action" in val_loss_dict:
                     val_log_str += f" | Val Act: {val_loss_dict['loss_action']:.4f}"
                 if "loss_gen" in val_loss_dict:
@@ -420,17 +495,24 @@ def main():
                 logging.info(val_log_str)
 
                 if tb_writer:
-                    tb_writer.add_scalar("val/loss", val_loss, global_step)
-                    for k, v in val_loss_dict.items():
-                        if isinstance(v, (int, float)):
-                            tb_writer.add_scalar(f"val/{k}", v, global_step)
+                    tb_writer.add_scalar("val_loss", val_loss, global_step)
+                    tb_writer.add_scalar("train_action_mse_error", train_action_mse, global_step)
+                    tb_writer.add_scalar("val_action_mse_error", val_action_mse, global_step)
 
                 if args.use_wandb:
                     import wandb
-                    wandb.log({
-                        "val/loss": val_loss,
-                        **{f"val/{k}": v for k, v in val_loss_dict.items()}
-                    }, step=global_step)
+                    eval_payload = {
+                        "val_loss": val_loss,
+                        "train_action_mse_error": train_action_mse,
+                        "val_action_mse_error": val_action_mse,
+                        "epoch": current_epoch,
+                        "global_step": global_step,
+                    }
+                    if "loss_action" in val_loss_dict:
+                        eval_payload["val_loss_action"] = val_loss_dict["loss_action"]
+                    if "loss_gen" in val_loss_dict:
+                        eval_payload["val_loss_gen"] = val_loss_dict["loss_gen"]
+                    wandb.log(eval_payload, step=global_step)
 
                 # Check and save best model
                 if val_loss < best_val_loss:
