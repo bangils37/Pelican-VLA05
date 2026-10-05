@@ -142,8 +142,13 @@ def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelican
         logging.info(f"Updated best model at {best_dir}")
 
 
-def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=False, world_size=1):
-    """Run validation evaluation loop."""
+def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=False, world_size=1, current_step=10000):
+    """Run validation evaluation loop.
+    
+    Args:
+        current_step: Passed to policy.forward() to correctly compute bottleneck warmup;
+                      use a large value (default 10000) so warmup is fully active during eval.
+    """
     policy.eval()
     val_loss_accum = 0.0
     val_loss_dict = {}
@@ -155,7 +160,7 @@ def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=Fals
                 break
             batch = {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss, loss_dict = policy(batch, current_step=0)
+                loss, loss_dict = policy(batch, current_step=current_step)
 
             val_loss_accum += loss.item()
             for k, v in loss_dict.items():
@@ -168,10 +173,20 @@ def evaluate(policy, val_dataloader, device, max_batches=50, is_distributed=Fals
         for k in val_loss_dict:
             val_loss_dict[k] /= batches_run
 
+    # In distributed mode: sync val loss AND every sub-loss across all GPUs
     if is_distributed:
+        # Sync main loss
         loss_tensor = torch.tensor([val_loss_accum], device=device)
         dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
         val_loss_accum = loss_tensor.item() / world_size
+
+        # Sync each sub-loss in val_loss_dict
+        keys = sorted(val_loss_dict.keys())
+        if keys:
+            values_tensor = torch.tensor([val_loss_dict[k] for k in keys], device=device)
+            dist.all_reduce(values_tensor, op=dist.ReduceOp.SUM)
+            for i, k in enumerate(keys):
+                val_loss_dict[k] = values_tensor[i].item() / world_size
 
     policy.train()
     return val_loss_accum, val_loss_dict
@@ -394,6 +409,7 @@ def main():
                 max_batches=args.eval_batches,
                 is_distributed=is_distributed,
                 world_size=world_size,
+                current_step=global_step,  # pass real step so bottleneck warmup is correct
             )
             if is_main_process:
                 val_log_str = f" >>> EVAL [Step {global_step}] Val Loss: {val_loss:.4f}"
