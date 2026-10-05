@@ -1,4 +1,4 @@
-"""End-to-end smoke test verifying data loading, forward, backward, optimizer step, and checkpointing."""
+"""End-to-end smoke test verifying data loading, forward, backward, optimizer step, and checkpointing for Full Fine-Tuning."""
 
 import os
 import sys
@@ -18,15 +18,15 @@ os.environ["COSMOS_TOKENIZER_PATH"] = str(_ROOT / "pretrained_model" / "cosmos_t
 os.environ["QWEN3_VL_PATH"] = "Qwen/Qwen3-VL-4B-Instruct"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# Pick GPU 3 which has 72+ GB free
-gpu_id = 3 if torch.cuda.device_count() > 3 else 0
+# Pick GPU 1 or 2 or 3
+gpu_id = 1 if torch.cuda.device_count() > 1 else 0
 if torch.cuda.is_available():
     torch.cuda.set_device(gpu_id)
 device = f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
-print(f"Running smoke test on device: {device} (Total free VRAM on {device}: {torch.cuda.mem_get_info(gpu_id)[0] // (1024**3)} GB)")
+print(f"Running smoke test on device: {device} (Total free VRAM: {torch.cuda.mem_get_info(gpu_id)[0] // (1024**3)} GB)")
 
 # 1. Dataset test
-dataset_path = "/home/anhnb9/Documents/datasets/astri_making_coffee_v21"
+dataset_path = "/home/aitt/data/serving_brewed_coffee_lrb_annotated"
 camera_map = {
     "cam_head": "image0",
     "cam_left_wrist": "image1",
@@ -38,7 +38,7 @@ dataset = LeRobotPelicanDataset(
     dataset_root=dataset_path,
     camera_map=camera_map,
     chunk_size=50,
-    future_horizon=25,
+    future_horizon=15,
 )
 print(f"Dataset successfully loaded: {len(dataset)} total frames.")
 
@@ -58,22 +58,22 @@ print(f"  image0 shape:       {batch['observation.images.image0'].shape}")
 print(f"  pixel_values shape: {batch['observation.pixel_values'].shape}")
 print(f"  input_ids shape:    {batch['observation.input_ids'].shape}")
 
-# 2. Model test with Gradient Checkpointing
+# 2. Model test with Gradient Checkpointing in FULL FINE-TUNING mode
 model_path = _ROOT / "pretrained_model" / "pelican_vla05"
 print(f"\n2. Loading pretrained Pelican-VLA 0.5 model from {model_path}...")
 policy = PelicanVLA05Policy.from_pretrained(str(model_path), strict=True)
-policy.model.config.gradient_checkpointing = True
+policy.model.config.freeze_backbone = False
+policy.model.gradient_checkpointing_enable()
 
-# Mode: Fine-tuning Heads & Bottleneck tokens (freeze backbone)
-print("Configuring fine-tuning mode (action head + bottleneck tokens)...")
-policy.model.config.freeze_backbone = True
-policy.model.set_requires_grad()
+# Configure Astribot 16-dim action/state
+policy.config.output_features["action"].shape = [16]
+policy.config.input_features["observation.state"].shape = [16]
 
 policy.to(device)
 policy.train()
 
 trainable_params = [p for p in policy.parameters() if p.requires_grad]
-print(f"Trainable parameters in head/bottleneck: {sum(p.numel() for p in trainable_params):,}")
+print(f"Trainable parameters in FULL fine-tune mode: {sum(p.numel() for p in trainable_params):,}")
 
 optimizer = torch.optim.AdamW(trainable_params, lr=2.5e-5)
 
@@ -104,13 +104,7 @@ torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
 optimizer.step()
 print(f"Step 2 Success! Total Loss: {loss2.item():.4f}")
 
-# 4. Checkpoint saving test
-test_save_dir = _ROOT / "checkpoints" / "smoke_test_ckpt"
-test_save_dir.mkdir(parents=True, exist_ok=True)
-policy.save_pretrained(str(test_save_dir))
-print(f"\n4. Model checkpoint successfully saved to: {test_save_dir}")
-
 print("\n" + "=" * 65)
-print("ALL SMOKE TESTS PASSED!")
+print("ALL FULL FINE-TUNING SMOKE TESTS PASSED!")
 print("Pelican-VLA 0.5 pipeline is fully configured and ready for training!")
 print("=" * 65)

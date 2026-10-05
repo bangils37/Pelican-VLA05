@@ -195,6 +195,14 @@ def main():
         logging.info("Freezing Qwen3-VL backbone. Fine-tuning action heads and bottleneck tokens only.")
         policy.model.config.freeze_backbone = True
         policy.model.set_requires_grad()
+    else:
+        logging.info("Configuring FULL fine-tuning mode (Qwen3-VL backbone + Action heads + Bottleneck tokens).")
+        policy.model.config.freeze_backbone = False
+        policy.model.gradient_checkpointing_enable()
+
+    # Update output features to match Astribot's 16 active joints for action loss
+    policy.config.output_features["action"].shape = [16]
+    policy.config.input_features["observation.state"].shape = [16]
 
     policy.to(device)
 

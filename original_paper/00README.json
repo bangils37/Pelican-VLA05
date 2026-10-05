@@ -1,0 +1,37 @@
+{
+   "sources" : [
+      {
+         "usage" : "toplevel",
+         "filename" : "main.tex"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "biblio.bib"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "decima-we-bold-italic.ttf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "decima-we-bold.ttf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "decima-we-italic.ttf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "decima-we-regular.ttf"
+      },
+      {
+         "usage" : "ignore",
+         "filename" : "realrobot.pdf"
+      }
+   ],
+   "spec_version" : 1,
+   "texlive_version" : "2025",
+   "process" : {
+      "compiler" : "pdflatex"
+   }
+}

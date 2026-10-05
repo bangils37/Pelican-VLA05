@@ -24,6 +24,8 @@ pretrained_model/
 *.pth
 *.bin
 *.safetensors
+*.tar
+*.tar.gz
 
 # --- env / editor / os ---
 .env

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-# Pelican-VLA 0.5 Training Launcher for Astribot Coffee Dataset
+# Pelican-VLA 0.5 Training Launcher for Astribot Coffee Dataset (Full Fine-Tuning)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
@@ -11,18 +11,17 @@ CONDA_ENV_PYTHON="/home/anhnb9/miniconda3/envs/pelican_vla/bin/python"
 export COSMOS_TOKENIZER_PATH="$PROJECT_ROOT/pretrained_model/cosmos_tokenizer"
 export QWEN3_VL_PATH="Qwen/Qwen3-VL-4B-Instruct"
 export LD_LIBRARY_PATH="/home/anhnb9/miniconda3/envs/pelican_vla/lib:$LD_LIBRARY_PATH"
-
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Configuration
-DATASET_PATH="/home/anhnb9/Documents/datasets/astri_making_coffee_v21"
+DATASET_PATH="/home/aitt/data/serving_brewed_coffee_lrb_annotated"
 PRETRAINED_MODEL="$PROJECT_ROOT/pretrained_model/pelican_vla05"
-OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee"
+OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee_full_ft"
 
 # Training Hyperparameters
-NUM_GPUS=${NUM_GPUS:-1}          # Set to 1 for single GPU, or 4 for all GPUs
-GPU_ID=${GPU_ID:-3}              # Used when NUM_GPUS=1 (GPU 3 has free memory)
-BATCH_SIZE=${BATCH_SIZE:-2}      # Per GPU batch size
+NUM_GPUS=${NUM_GPUS:-4}          # Default to 4 GPUs for Full Fine-Tuning
+GPU_ID=${GPU_ID:-0}              # Used when NUM_GPUS=1
+BATCH_SIZE=${BATCH_SIZE:-4}      # Per GPU batch size (4 * 4 = 16 effective batch)
 MAX_STEPS=${MAX_STEPS:-5000}     # Total training steps
 LR=${LR:-2.5e-5}                 # Peak learning rate
 WARMUP_STEPS=${WARMUP_STEPS:-500}
@@ -30,7 +29,7 @@ SAVE_STEPS=${SAVE_STEPS:-500}
 LOG_STEPS=${LOG_STEPS:-10}
 
 echo "=========================================================="
-echo "Starting Pelican-VLA 0.5 Fine-Tuning"
+echo "Starting Pelican-VLA 0.5 FULL FINE-TUNING"
 echo "Project Root:      $PROJECT_ROOT"
 echo "Dataset Path:      $DATASET_PATH"
 echo "Pretrained Model:  $PRETRAINED_MODEL"
@@ -44,7 +43,7 @@ echo "=========================================================="
 mkdir -p "$OUTPUT_DIR"
 
 if [ "$NUM_GPUS" -gt 1 ]; then
-    echo "Running Multi-GPU Distributed Training via torchrun ($NUM_GPUS GPUs)..."
+    echo "Running Multi-GPU Distributed Full Fine-Tuning via torchrun ($NUM_GPUS GPUs)..."
     /home/anhnb9/miniconda3/envs/pelican_vla/bin/torchrun \
         --nproc_per_node="$NUM_GPUS" \
         --master_port=29500 \
@@ -60,7 +59,7 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --save_steps "$SAVE_STEPS" \
         --log_steps "$LOG_STEPS"
 else
-    echo "Running Single-GPU Training on GPU $GPU_ID..."
+    echo "Running Single-GPU Full Fine-Tuning on GPU $GPU_ID..."
     CUDA_VISIBLE_DEVICES=$GPU_ID "$CONDA_ENV_PYTHON" "$PROJECT_ROOT/training/train.py" \
         --dataset_path "$DATASET_PATH" \
         --pretrained_model_path "$PRETRAINED_MODEL" \
