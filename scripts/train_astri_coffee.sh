@@ -28,6 +28,16 @@ WARMUP_STEPS=${WARMUP_STEPS:-500}
 SAVE_STEPS=${SAVE_STEPS:-500}
 LOG_STEPS=${LOG_STEPS:-10}
 
+# Weights & Biases (W&B) Logging
+USE_WANDB=${USE_WANDB:-1}        # 1 to enable W&B, 0 to disable
+WANDB_PROJECT=${WANDB_PROJECT:-"astribot_making_coffee"}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-"pelican_vla05_full_ft_$(date +%Y%m%d_%H%M%S)"}
+
+WANDB_ARGS=""
+if [ "$USE_WANDB" -eq 1 ]; then
+    WANDB_ARGS="--use_wandb --wandb_project $WANDB_PROJECT --wandb_run_name $WANDB_RUN_NAME"
+fi
+
 echo "=========================================================="
 echo "Starting Pelican-VLA 0.5 FULL FINE-TUNING"
 echo "Project Root:      $PROJECT_ROOT"
@@ -38,6 +48,7 @@ echo "Number of GPUs:    $NUM_GPUS"
 echo "Batch Size / GPU:  $BATCH_SIZE"
 echo "Max Steps:         $MAX_STEPS"
 echo "Learning Rate:     $LR"
+echo "W&B Tracking:      Enabled ($WANDB_PROJECT / $WANDB_RUN_NAME)"
 echo "=========================================================="
 
 mkdir -p "$OUTPUT_DIR"
@@ -57,7 +68,8 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --warmup_steps "$WARMUP_STEPS" \
         --max_steps "$MAX_STEPS" \
         --save_steps "$SAVE_STEPS" \
-        --log_steps "$LOG_STEPS"
+        --log_steps "$LOG_STEPS" \
+        $WANDB_ARGS
 else
     echo "Running Single-GPU Full Fine-Tuning on GPU $GPU_ID..."
     CUDA_VISIBLE_DEVICES=$GPU_ID "$CONDA_ENV_PYTHON" "$PROJECT_ROOT/training/train.py" \
@@ -70,5 +82,6 @@ else
         --warmup_steps "$WARMUP_STEPS" \
         --max_steps "$MAX_STEPS" \
         --save_steps "$SAVE_STEPS" \
-        --log_steps "$LOG_STEPS"
+        --log_steps "$LOG_STEPS" \
+        $WANDB_ARGS
 fi
