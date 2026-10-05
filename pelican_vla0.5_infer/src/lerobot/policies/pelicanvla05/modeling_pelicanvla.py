@@ -264,6 +264,10 @@ class PelicanVLA05(nn.Module):
             qwen_path,
             config=vlm_config,
         )
+        if not hasattr(self.vlm, "visual") and hasattr(self.vlm, "model") and hasattr(self.vlm.model, "visual"):
+            self.vlm.visual = self.vlm.model.visual
+        if not hasattr(self.vlm, "language_model") and hasattr(self.vlm, "model") and hasattr(self.vlm.model, "language_model"):
+            self.vlm.language_model = self.vlm.model.language_model
 
         # ---- Cosmos tokenizer (frozen) ----
         cosmos_encoder, cosmos_decoder = _resolve_cosmos_jit_files(config)
@@ -451,7 +455,13 @@ class PelicanVLA05(nn.Module):
         """Build Qwen's interleaved image-and-language input sequence."""
         patch_matrix = pixel_values.reshape(-1, pixel_values.shape[-1])
         grid = image_grid_thw.reshape(-1, 3)
-        visual_tokens, _ = self.vlm.visual(patch_matrix, grid)
+        visual_out = self.vlm.visual(patch_matrix, grid)
+        if hasattr(visual_out, "pooler_output") and visual_out.pooler_output is not None:
+            visual_tokens = visual_out.pooler_output
+        elif isinstance(visual_out, (tuple, list)):
+            visual_tokens = visual_out[0]
+        else:
+            visual_tokens = visual_out
 
         text_tokens = self.vlm.get_input_embeddings()(lang_tokens)
         hidden_size = text_tokens.shape[-1]
@@ -480,7 +490,8 @@ class PelicanVLA05(nn.Module):
             mode="bilinear",
             align_corners=False,
         ).mul(2).sub(1)
-        encoded = self.cosmos.encode(normalized)
+        with torch.no_grad():
+            encoded = self.cosmos.encode(normalized)
         return encoded.unflatten(0, leading_shape)
 
     def embed_middle(self, images, img_masks):
@@ -681,11 +692,22 @@ class PelicanVLA05(nn.Module):
         grid_thw = None
         if image_grid_thw is not None:
             grid_thw = image_grid_thw.reshape(-1, 3)
-        position_ids, rope_deltas = self.vlm.model.get_rope_index(
-            full_tokens,
-            grid_thw,
-            attention_mask=pad_masks.to(dtype=lang_tokens.dtype),
-        )
+
+        image_token_id = getattr(self.vlm.config, "image_token_id", 151655)
+        mm_token_type_ids = (full_tokens == image_token_id).int()
+        try:
+            position_ids, rope_deltas = self.vlm.model.get_rope_index(
+                full_tokens,
+                mm_token_type_ids=mm_token_type_ids,
+                image_grid_thw=grid_thw,
+                attention_mask=pad_masks.to(dtype=lang_tokens.dtype),
+            )
+        except TypeError:
+            position_ids, rope_deltas = self.vlm.model.get_rope_index(
+                full_tokens,
+                grid_thw,
+                attention_mask=pad_masks.to(dtype=lang_tokens.dtype),
+            )
         return position_ids, rope_deltas
 
     def decode_cosmos(self, features):
@@ -769,7 +791,11 @@ class PelicanVLA05(nn.Module):
         L_prefix = prefix_embs.shape[1]
         L_middle = middle_embs.shape[1]
 
+        vlm_dtype = self.vlm.language_model.layers[0].self_attn.q_proj.weight.dtype
+        all_embs = all_embs.to(dtype=vlm_dtype)
+
         def forward_func(all_embs, att_2d_masks_4d, position_ids):
+            all_embs = all_embs.to(dtype=vlm_dtype)
             vlm_output = self.vlm.language_model(
                 inputs_embeds=all_embs,
                 attention_mask=att_2d_masks_4d,

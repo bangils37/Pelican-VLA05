@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -e
+
+# Pelican-VLA 0.5 Training Launcher for Astribot Coffee Dataset
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+
+CONDA_ENV_PYTHON="/home/anhnb9/miniconda3/envs/pelican_vla/bin/python"
+
+# Environment Variables
+export COSMOS_TOKENIZER_PATH="$PROJECT_ROOT/pretrained_model/cosmos_tokenizer"
+export QWEN3_VL_PATH="Qwen/Qwen3-VL-4B-Instruct"
+export LD_LIBRARY_PATH="/home/anhnb9/miniconda3/envs/pelican_vla/lib:$LD_LIBRARY_PATH"
+
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+
+# Configuration
+DATASET_PATH="/home/anhnb9/Documents/datasets/astri_making_coffee_v21"
+PRETRAINED_MODEL="$PROJECT_ROOT/pretrained_model/pelican_vla05"
+OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee"
+
+# Training Hyperparameters
+NUM_GPUS=${NUM_GPUS:-1}          # Set to 1 for single GPU, or 4 for all GPUs
+GPU_ID=${GPU_ID:-3}              # Used when NUM_GPUS=1 (GPU 3 has free memory)
+BATCH_SIZE=${BATCH_SIZE:-2}      # Per GPU batch size
+MAX_STEPS=${MAX_STEPS:-5000}     # Total training steps
+LR=${LR:-2.5e-5}                 # Peak learning rate
+WARMUP_STEPS=${WARMUP_STEPS:-500}
+SAVE_STEPS=${SAVE_STEPS:-500}
+LOG_STEPS=${LOG_STEPS:-10}
+
+echo "=========================================================="
+echo "Starting Pelican-VLA 0.5 Fine-Tuning"
+echo "Project Root:      $PROJECT_ROOT"
+echo "Dataset Path:      $DATASET_PATH"
+echo "Pretrained Model:  $PRETRAINED_MODEL"
+echo "Output Directory:  $OUTPUT_DIR"
+echo "Number of GPUs:    $NUM_GPUS"
+echo "Batch Size / GPU:  $BATCH_SIZE"
+echo "Max Steps:         $MAX_STEPS"
+echo "Learning Rate:     $LR"
+echo "=========================================================="
+
+mkdir -p "$OUTPUT_DIR"
+
+if [ "$NUM_GPUS" -gt 1 ]; then
+    echo "Running Multi-GPU Distributed Training via torchrun ($NUM_GPUS GPUs)..."
+    /home/anhnb9/miniconda3/envs/pelican_vla/bin/torchrun \
+        --nproc_per_node="$NUM_GPUS" \
+        --master_port=29500 \
+        "$PROJECT_ROOT/training/train.py" \
+        --dataset_path "$DATASET_PATH" \
+        --pretrained_model_path "$PRETRAINED_MODEL" \
+        --cosmos_tokenizer_path "$COSMOS_TOKENIZER_PATH" \
+        --output_dir "$OUTPUT_DIR" \
+        --batch_size "$BATCH_SIZE" \
+        --learning_rate "$LR" \
+        --warmup_steps "$WARMUP_STEPS" \
+        --max_steps "$MAX_STEPS" \
+        --save_steps "$SAVE_STEPS" \
+        --log_steps "$LOG_STEPS"
+else
+    echo "Running Single-GPU Training on GPU $GPU_ID..."
+    CUDA_VISIBLE_DEVICES=$GPU_ID "$CONDA_ENV_PYTHON" "$PROJECT_ROOT/training/train.py" \
+        --dataset_path "$DATASET_PATH" \
+        --pretrained_model_path "$PRETRAINED_MODEL" \
+        --cosmos_tokenizer_path "$COSMOS_TOKENIZER_PATH" \
+        --output_dir "$OUTPUT_DIR" \
+        --batch_size "$BATCH_SIZE" \
+        --learning_rate "$LR" \
+        --warmup_steps "$WARMUP_STEPS" \
+        --max_steps "$MAX_STEPS" \
+        --save_steps "$SAVE_STEPS" \
+        --log_steps "$LOG_STEPS"
+fi

@@ -18,6 +18,12 @@ build/
 *.npz
 *.npy
 logs/
+checkpoints/
+pretrained_model/
+*.pt
+*.pth
+*.bin
+*.safetensors
 
 # --- env / editor / os ---
 .env
