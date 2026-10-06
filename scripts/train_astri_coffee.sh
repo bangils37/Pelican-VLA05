@@ -15,8 +15,15 @@ export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Configuration
 DATASET_PATH="/home/aitt/data/serving_brewed_coffee_lrb_annotated"
-PRETRAINED_MODEL="$PROJECT_ROOT/pretrained_model/pelican_vla05"
 OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee_full_ft"
+
+# Pretrained model / Checkpoint to continue from
+if [ -d "$OUTPUT_DIR/best_model" ]; then
+    DEFAULT_PRETRAINED="$OUTPUT_DIR/best_model"
+else
+    DEFAULT_PRETRAINED="$PROJECT_ROOT/pretrained_model/pelican_vla05"
+fi
+PRETRAINED_MODEL=${PRETRAINED_MODEL:-"$DEFAULT_PRETRAINED"}
 
 # GPU Isolation (Default to GPUs 1,2,3 to preserve GPU 0 for Desktop/Display)
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-"1,2,3"}
@@ -31,10 +38,11 @@ GPU_ID=${GPU_ID:-0}              # Used when NUM_GPUS=1
 BATCH_SIZE=${BATCH_SIZE:-4}      # Per GPU batch size
 NUM_WORKERS=${NUM_WORKERS:-2}    # DataLoader workers per GPU (memory-safe)
 MAX_VIDEO_READERS=${MAX_VIDEO_READERS:-6} # Max open VideoReaders per worker
-MAX_STEPS=${MAX_STEPS:-5000}     # Total training steps
+MAX_STEPS=${MAX_STEPS:-300000}    # Total training steps (default 30k)
 LR=${LR:-2.5e-5}                 # Peak learning rate
 WARMUP_STEPS=${WARMUP_STEPS:-500}
-SAVE_STEPS=${SAVE_STEPS:-500}
+SAVE_STEPS=${SAVE_STEPS:-250}   # Save checkpoint every N steps
+SAVE_TOTAL_LIMIT=${SAVE_TOTAL_LIMIT:-1} # Keep only last K regular checkpoints to avoid filling disk
 LOG_STEPS=${LOG_STEPS:-10}
 
 # Validation Hyperparameters
@@ -45,7 +53,7 @@ EVAL_BATCHES=${EVAL_BATCHES:-50} # Batches to evaluate per validation run
 # Weights & Biases (W&B) Logging
 USE_WANDB=${USE_WANDB:-1}        # 1 to enable W&B, 0 to disable
 WANDB_PROJECT=${WANDB_PROJECT:-"astribot_making_coffee"}
-WANDB_RUN_NAME=${WANDB_RUN_NAME:-"pelican_vla05_full_ft_$(date +%Y%m%d_%H%M%S)"}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-"pelican_vla05_continue_$(date +%Y%m%d_%H%M%S)"}
 
 WANDB_ARGS=""
 if [ "$USE_WANDB" -eq 1 ]; then
@@ -53,16 +61,17 @@ if [ "$USE_WANDB" -eq 1 ]; then
 fi
 
 echo "=========================================================="
-echo "Starting Pelican-VLA 0.5 FULL FINE-TUNING"
+echo "Starting Pelican-VLA 0.5 FULL FINE-TUNING (Continue/Resume)"
 echo "Project Root:         $PROJECT_ROOT"
 echo "Dataset Path:         $DATASET_PATH"
-echo "Pretrained Model:     $PRETRAINED_MODEL"
+echo "Model Weights:        $PRETRAINED_MODEL"
 echo "Output Directory:     $OUTPUT_DIR"
 echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
 echo "Number of GPUs:       $NUM_GPUS"
 echo "Workers / GPU:        $NUM_WORKERS (Max Video Readers: $MAX_VIDEO_READERS)"
 echo "Batch Size / GPU:     $BATCH_SIZE"
 echo "Max Steps:            $MAX_STEPS"
+echo "Save Steps:           $SAVE_STEPS (Keep max $SAVE_TOTAL_LIMIT checkpoints)"
 echo "Learning Rate:        $LR"
 echo "Validation Split:     ${VAL_RATIO} (Eval every ${EVAL_STEPS} steps, ${EVAL_BATCHES} batches)"
 echo "W&B Tracking:         Enabled ($WANDB_PROJECT / $WANDB_RUN_NAME)"
@@ -87,6 +96,7 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --warmup_steps "$WARMUP_STEPS" \
         --max_steps "$MAX_STEPS" \
         --save_steps "$SAVE_STEPS" \
+        --save_total_limit "$SAVE_TOTAL_LIMIT" \
         --log_steps "$LOG_STEPS" \
         --val_ratio "$VAL_RATIO" \
         --eval_steps "$EVAL_STEPS" \
@@ -106,6 +116,7 @@ else
         --warmup_steps "$WARMUP_STEPS" \
         --max_steps "$MAX_STEPS" \
         --save_steps "$SAVE_STEPS" \
+        --save_total_limit "$SAVE_TOTAL_LIMIT" \
         --log_steps "$LOG_STEPS" \
         --val_ratio "$VAL_RATIO" \
         --eval_steps "$EVAL_STEPS" \

@@ -98,7 +98,8 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=5000, help="Total training steps")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Gradient accumulation steps")
     parser.add_argument("--grad_clip_norm", type=float, default=1.0, help="Max gradient norm")
-    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every N steps")
+    parser.add_argument("--save_steps", type=int, default=250, help="Save checkpoint every N steps")
+    parser.add_argument("--save_total_limit", type=int, default=1, help="Maximum number of regular checkpoints to keep")
     parser.add_argument("--log_steps", type=int, default=10, help="Log metrics every N steps")
     parser.add_argument("--eval_steps", type=int, default=250, help="Evaluate validation loss every N steps")
     parser.add_argument("--eval_batches", type=int, default=50, help="Number of val batches to evaluate per eval")
@@ -110,8 +111,17 @@ def parse_args():
     return parser.parse_args()
 
 
-def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelicanDataset, is_best: bool = False):
+def save_checkpoint(
+    policy,
+    output_dir: Path,
+    step: int,
+    dataset: LeRobotPelicanDataset,
+    is_best: bool = False,
+    save_total_limit: int = 1,
+    val_loss: float = None,
+):
     """Save checkpoint in native Pelican-VLA format."""
+    import shutil
     unwrapped = policy.module if isinstance(policy, DDP) else policy
 
     stats = {}
@@ -131,18 +141,58 @@ def save_checkpoint(policy, output_dir: Path, step: int, dataset: LeRobotPelican
         save_dir = output_dir / f"checkpoint-{step:06d}"
         save_dir.mkdir(parents=True, exist_ok=True)
         unwrapped.save_pretrained(str(save_dir))
+        cfg_path = save_dir / "config.json"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_d = json.load(f)
+            if "type" not in cfg_d:
+                cfg_d = {"type": "pelican_vla05", **cfg_d}
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg_d, f, indent=2)
         if stats:
             with open(save_dir / "stats.json", "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
         logging.info(f"Saved regular checkpoint to {save_dir}")
+
+        # Automatically clean old regular checkpoints to preserve disk space
+        if save_total_limit > 0:
+            def get_ckpt_step(p):
+                parts = p.name.split("-")
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    return int(parts[-1])
+                return int(p.stat().st_mtime)
+
+            all_ckpts = sorted(
+                [d for d in output_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")],
+                key=get_ckpt_step,
+            )
+            if len(all_ckpts) > save_total_limit:
+                for old_d in all_ckpts[:-save_total_limit]:
+                    try:
+                        shutil.rmtree(old_d)
+                        logging.info(f"Removed old checkpoint to preserve disk space: {old_d.name}")
+                    except Exception as e:
+                        logging.warning(f"Could not remove old checkpoint {old_d}: {e}")
     else:
         best_dir = output_dir / "best_model"
         best_dir.mkdir(parents=True, exist_ok=True)
         unwrapped.save_pretrained(str(best_dir))
+        cfg_path = best_dir / "config.json"
+        if cfg_path.is_file():
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg_d = json.load(f)
+            if "type" not in cfg_d:
+                cfg_d = {"type": "pelican_vla05", **cfg_d}
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg_d, f, indent=2)
         if stats:
             with open(best_dir / "stats.json", "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=2)
-        logging.info(f"Updated best model at {best_dir}")
+        if val_loss is not None:
+            with open(best_dir / "best_val_loss.txt", "w", encoding="utf-8") as f:
+                f.write(f"{val_loss:.6f}\n")
+        loss_info = f" (val_loss: {val_loss:.4f})" if val_loss is not None else ""
+        logging.info(f"Updated best model at {best_dir}{loss_info}")
 
 
 def compute_batch_action_mse(policy, batch, action_mean=None, action_std=None):
@@ -387,6 +437,14 @@ def main():
     # 5. Training loop
     global_step = 0
     best_val_loss = float("inf")
+    best_metric_file = output_dir / "best_model" / "best_val_loss.txt"
+    if best_metric_file.is_file():
+        try:
+            with open(best_metric_file, "r") as f:
+                best_val_loss = float(f.read().strip())
+            logging.info(f"Loaded existing baseline best_val_loss: {best_val_loss:.4f} from {best_metric_file}")
+        except Exception as e:
+            logging.warning(f"Could not read existing best_val_loss.txt: {e}")
     policy.train()
 
     pbar = tqdm(total=args.max_steps, desc="Training Pelican-VLA", disable=not is_main_process)
@@ -464,7 +522,7 @@ def main():
                 wandb.log(wandb_payload, step=global_step)
 
         # Validation Loss Evaluation
-        if (global_step % args.eval_steps == 0 or global_step == 1) and len(val_dataset) > 0:
+        if global_step % args.eval_steps == 0 and len(val_dataset) > 0:
             val_loss, val_loss_dict, val_action_mse = evaluate(
                 policy,
                 val_dataloader,
@@ -518,15 +576,15 @@ def main():
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     logging.info(f"New BEST validation loss: {best_val_loss:.4f}! Saving best_model...")
-                    save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=True)
+                    save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=True, val_loss=best_val_loss)
 
         # Regular Checkpointing
         if global_step % args.save_steps == 0 and is_main_process:
-            save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=False)
+            save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=False, save_total_limit=args.save_total_limit)
 
     # Final save
     if is_main_process:
-        save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=False)
+        save_checkpoint(policy, output_dir, global_step, train_dataset, is_best=False, save_total_limit=args.save_total_limit)
         logging.info("Training completed successfully!")
         if tb_writer:
             tb_writer.close()
