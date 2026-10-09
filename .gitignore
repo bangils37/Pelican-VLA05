@@ -37,3 +37,4 @@ pretrained_model/
 # --- wandb & logs ---
 wandb/
 *.log
+*.bak
