@@ -1,0 +1,39 @@
+# Physical Astribot S1 topics, matched to the Diffusion Policy deployment.
+camera_topics:
+  cam_head:
+    topic: /astribot_camera/head_rgbd/color_compress/compressed
+    message_type: compressed
+  cam_left_wrist:
+    topic: /astribot_camera/left_wrist_rgbd/color_compress/compressed
+    message_type: compressed
+  cam_right_wrist:
+    topic: /astribot_camera/right_wrist_rgbd/color_compress/compressed
+    message_type: compressed
+
+state_topics:
+  torso: /astribot_torso/joint_space_states
+  left_arm: /astribot_arm_left/joint_space_states
+  right_arm: /astribot_arm_right/joint_space_states
+  left_gripper: /astribot_gripper_left/joint_space_states
+  right_gripper: /astribot_gripper_right/joint_space_states
+  head: /astribot_head/joint_space_states
+
+required_state_parts:
+  - torso
+  - left_arm
+  - right_arm
+  - left_gripper
+  - right_gripper
+  - head
+
+command_topics:
+  torso: /astribot_torso/joint_space_command
+  left_arm: /astribot_arm_left/joint_space_command
+  right_arm: /astribot_arm_right/joint_space_command
+  left_gripper: /astribot_gripper_left/joint_space_command
+  right_gripper: /astribot_gripper_right/joint_space_command
+  head: /astribot_head/joint_space_command
+
+command_stream:
+  publish_hz: 250.0
+  arm_velocity_limit: 8.0

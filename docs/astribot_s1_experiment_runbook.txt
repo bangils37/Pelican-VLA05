@@ -1,0 +1,471 @@
+ASTRIBOT S1 - RUNBOOK INFER PELICAN-VLA05
+=========================================
+
+Cap nhat: 2026-10-09
+May/repo local: /home/anhnb9/Documents/Pelican-VLA05
+Nhanh hien tai: main
+Commit nen: 3915eb8
+Luu y: code inference Astribot dang la thay doi working tree chua commit. Truoc
+khi dong bo sang may khac, phai commit/tag va cap nhat lai dong commit da kiem thu.
+
+
+MUC TIEU
+--------
+1. Kiem tra ROS, camera, state va checkpoint ma KHONG gui command.
+2. Dry-run Pelican-VLA05 tren Astribot S1 voi task "serving brewed coffee".
+3. Thu tren simulator theo tung muc: 1 cycle x 1 action, sau do moi tang dan.
+4. Chi cho phep thu robot that khi tat ca dieu kien GO o muc 7 deu dat.
+
+
+CANH BAO AN TOAN - DOC TRUOC KHI CHAY
+------------------------------------
+- Mac dinh runtime la DRY-RUN. Chi co --execute moi publish command.
+- Lan dau co --execute phai co nguoi dung canh robot va san sang E-stop.
+- Don sach khong gian quanh torso, head, hai arm va hai gripper.
+- --prepare-ready-pose di chuyen TOAN THAN ve VMO TELEOP_POSE, bao gom torso,
+  head, hai arm va hai gripper. Robot se cui dau trong buoc nay.
+- Moi lan execute dau tien phai doc prompt va chi nhap "s" sau khi quan sat khu
+  vuc an toan. KHONG dung --yes tren robot that.
+- KHONG dung --disable-joint-limits tren robot that.
+- State/action la absolute joint-position target 16-D theo thu tu:
+
+    [left_arm_j0..j6, right_arm_j0..j6, left_gripper, right_gripper]
+
+- Gripper dung mien [0, 100]. Arm dung radian.
+- Runtime gioi han moi policy step toi 0.15 rad/arm joint va 20 don vi/gripper.
+- Arm command duoc stream 250 Hz, gioi han van toc 8 rad/s moi joint.
+- Runtime tu dung truoc command ke tiep sau 3 mau tracking CRITICAL lien tiep.
+- Stale camera/state, NaN/Inf va inference qua cham deu bi tu choi.
+- Co che software KHONG thay the E-stop vat ly. Neu robot rung, va cham, di sai
+  huong hoac mat kiem soat: bam E-stop truoc, sau do Ctrl-C terminal.
+
+
+0. DUONG DAN VA THONG SO DA CO
+-----------------------------
+
+Repo:
+  /home/anhnb9/Documents/Pelican-VLA05
+
+Checkpoint Coffee:
+  checkpoints/pelican_astri_coffee_full_ft/best_model
+
+Checkpoint gom:
+  model.safetensors
+  config.json
+  stats.json
+
+Cosmos tokenizer:
+  pretrained_model/cosmos_tokenizer/encoder.jit
+  pretrained_model/cosmos_tokenizer/decoder.jit
+
+ROS configs:
+  Robot that: pelican_vla0.5_infer/configs/astribot_s1_ros2.yaml
+  Simulator:  pelican_vla0.5_infer/configs/astribot_s1_sim_ros2.yaml
+
+Entrypoints:
+  infer_astribot.py
+  scripts/run_astribot_inference.sh
+
+Model da kiem tra co:
+  state_dim=16
+  action_dim=16
+  chunk_size=50
+  image_resolution=224x224
+  num_inference_steps=10
+  cameras=cam_head, cam_left_wrist, cam_right_wrist
+
+Checkpoint tren duoc train voi image offsets [-15, 0, 15]. Online runtime
+khong the doc frame tuong lai +15, nen slot nay duoc thay bang frame moi nhat.
+Day la train/deployment mismatch. Nen train checkpoint causal (vi du [-15, 0,
+0]) truoc khi danh gia chinh thuc tren robot that.
+
+
+1. TERMINAL A - START/KIEM TRA ROS BRIDGE
+----------------------------------------
+
+Neu chay tren may khac, SSH vao may dieu khien truoc. Tren may hien tai:
+
+  cd /home/anhnb9/Documents/vm_astribot
+
+Kiem tra bridge container:
+
+  docker ps --filter name=astribot_bridge
+
+Neu bridge chua chay, chi start sau khi robot va ROS master da san sang:
+
+  ./run_bridge.sh 192.168.0.10 bridge
+
+Xem log neu co loi:
+
+  docker logs --tail 100 astribot_bridge
+
+Source ROS va Astribot overlay de kiem tra topic read-only:
+
+  source /opt/ros/humble/setup.bash
+  source /home/anhnb9/Documents/vm_astribot/install/setup.bash
+  export ROS_DOMAIN_ID=25
+
+Kiem tra state topics:
+
+  ros2 topic list | grep -E 'joint_space_states$'
+
+Phai co it nhat:
+  /astribot_torso/joint_space_states
+  /astribot_head/joint_space_states
+  /astribot_arm_left/joint_space_states
+  /astribot_arm_right/joint_space_states
+  /astribot_gripper_left/joint_space_states
+  /astribot_gripper_right/joint_space_states
+
+Kiem tra camera topics:
+
+  ros2 topic list | grep '/astribot_camera/'
+
+Phai co dung 3 input cua checkpoint:
+  /astribot_camera/head_rgbd/color_compress/compressed
+  /astribot_camera/left_wrist_rgbd/color_compress/compressed
+  /astribot_camera/right_wrist_rgbd/color_compress/compressed
+
+Kiem tra type:
+
+  ros2 topic type /astribot_camera/head_rgbd/color_compress/compressed
+  ros2 topic type /astribot_arm_left/joint_space_states
+
+Ket qua mong doi:
+  sensor_msgs/msg/CompressedImage
+  astribot_msgs/msg/RobotJointState
+
+Neu chi co joint-state ma khong co camera topic, camera bridge/driver chua hoat
+dong. KHONG chuyen sang --execute. Xem them:
+
+  ros2 topic list | grep -Ei 'camera|image|rgb|compress'
+  docker logs --tail 100 astribot_bridge
+
+
+2. TERMINAL B - REPO, PYTHON ENV VA LOG
+--------------------------------------
+
+  cd /home/anhnb9/Documents/Pelican-VLA05
+
+Khai bao duong dan:
+
+  REPO=/home/anhnb9/Documents/Pelican-VLA05
+  MODEL="$REPO/checkpoints/pelican_astri_coffee_full_ft/best_model"
+  LOG_DIR=/home/anhnb9/Desktop/pelican_astribot_logs
+  mkdir -p "$LOG_DIR"
+
+Kiem tra checkpoint:
+
+  ls -lh "$MODEL/model.safetensors" "$MODEL/config.json" "$MODEL/stats.json"
+
+QUAN TRONG VE PYTHON:
+- Env train pelican_vla la Python 3.12.
+- ROS 2 Humble/astribot_msgs tren may nay duoc build cho Python 3.10.
+- Khong chay ROS runtime bang env Python 3.12 vi rclpy native module se loi ABI.
+- Wrapper mac dinh dung Python 3.10 cua Diffusion Policy:
+
+    /home/anhnb9/Documents/diffusion_policy/env/bin/python
+
+Cai dependency Pelican vao env Python 3.10 mot lan:
+
+  /home/anhnb9/Documents/diffusion_policy/env/bin/python -m pip install \
+    -r "$REPO/pelican_vla0.5_infer/requirements.txt"
+
+Kiem tra import sau khi cai:
+
+  source /opt/ros/humble/setup.bash
+  source /home/anhnb9/Documents/vm_astribot/install/setup.bash
+  /home/anhnb9/Documents/diffusion_policy/env/bin/python -c \
+    'import rclpy, astribot_msgs, torch, transformers, draccus, cv2, yaml; print("imports OK")'
+
+Wrapper scripts/run_astribot_inference.sh se tu source ROS 2, Astribot overlay,
+set ROS_DOMAIN_ID=25 va COSMOS_TOKENIZER_PATH. Khong can source lai trong cung
+terminal khi dung wrapper.
+
+
+3. PREFLIGHT SOFTWARE - KHONG GUI COMMAND
+----------------------------------------
+
+3.1. Kiem tra code va unit tests:
+
+  cd "$REPO"
+  /home/anhnb9/miniconda3/envs/pelican_vla/bin/python -m compileall -q \
+    infer_astribot.py pelican_vla0.5_infer tests
+  bash -n scripts/run_astribot_inference.sh
+  git diff --check
+
+Chay regression tests ROS-independent:
+
+  /home/anhnb9/miniconda3/envs/pelican_vla/bin/python \
+    tests/test_astribot_runtime.py
+
+Ket qua hien tai: 6 runtime tests passed.
+
+3.2. ROS ABI smoke test voi publisher GIA:
+
+  source /opt/ros/humble/setup.bash
+  source /home/anhnb9/Documents/vm_astribot/install/setup.bash
+  /home/anhnb9/Documents/diffusion_policy/env/bin/python \
+    tests/smoke_astribot_ros2.py
+
+Script nay thay command publisher bang recorder trong memory TRUOC KHI test
+command path. No khong publish command len robot, ke ca khi domain 25 dang live.
+Ket qua mong doi:
+  ROS bridge smoke test passed
+
+3.3. Kiem tra GPU:
+
+  nvidia-smi
+
+Pelican checkpoint da do peak VRAM khoang 20.8 GB cho batch 1. Chi chon GPU co
+it nhat 24 GB free de co buffer an toan. Vi du:
+
+  DEVICE=cuda:0
+
+Khong chay CPU cho control synchronous tren robot that.
+
+
+4. DRY-RUN CHECKPOINT - KHONG GUI COMMAND
+----------------------------------------
+
+Dam bao 3 camera va 6 state streams da co. Chay:
+
+  cd "$REPO"
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --device "$DEVICE" \
+    --task "serving brewed coffee" \
+    --max-cycles 3 \
+    2>&1 | tee "$LOG_DIR/00_pelican_coffee_dry.log"
+
+Lenh tren KHONG co --execute, nen khong publish command.
+
+Output can thay:
+- checkpoint load thanh cong;
+- canh bao positive image offset +15;
+- Ready: mode=DRY-RUN;
+- cameras gom cam_head/cam_left_wrist/cam_right_wrist;
+- output action shape (noi bo) la 50x16, finite;
+- moi cycle in inference=..., raw_arm_jump=..., grippers=[..., ...];
+- neu inference > 1 giay, in WARNING latency nhung dry-run van tiep tuc;
+- tu ket thuc sau 3 cycles.
+
+Neu timeout/missing camera:
+1. Khong them --execute.
+2. De runtime dang cho trong khi xem bridge demand-driven.
+3. Kiem tra lai muc 1 va docker logs.
+4. Xac nhan camera driver, ROS master va domain 25.
+
+4.1. Chi test thong luong tren may khi camera vat ly chua online:
+
+Terminal A (publisher nay CHI tao 3 camera topic gia):
+
+  source /opt/ros/humble/setup.bash
+  source /home/anhnb9/Documents/vm_astribot/install/setup.bash
+  export ROS_DOMAIN_ID=25
+  /home/anhnb9/Documents/diffusion_policy/env/bin/python \
+    tests/publish_fake_astribot_cameras.py
+
+Terminal B chay lenh dry-run o tren voi --max-cycles 1. TUYET DOI khong them
+--execute khi dang dung anh gia. Anh gia chi kiem tra wiring ROS, decode,
+observation assembly, checkpoint load va inference; no khong validate policy
+quality, scene Coffee hay camera vat ly. Ctrl-C Terminal A ngay sau khi test.
+
+Neu model load loi Qwen/Cosmos:
+
+  echo "$COSMOS_TOKENIZER_PATH"
+  ls -lh "$REPO/pretrained_model/cosmos_tokenizer/"{encoder,decoder}.jit
+  echo "$QWEN3_VL_PATH"
+
+Qwen processor mac dinh dung Qwen/Qwen3-VL-4B-Instruct tu HF cache/hub. Neu
+may offline, set QWEN3_VL_PATH toi thu muc local da tai day du.
+
+
+5. LATENCY GATE - BAT BUOC TRUOC EXECUTE
+---------------------------------------
+
+Runtime co:
+  --max-inference-latency 1.0
+
+Trong mode --execute, neu mot chunk infer cham hon nguong nay, runtime raise loi
+va KHONG publish chunk vua du do action da cu.
+
+Ket qua da do ngay 2026-10-09 tren GPU chia se:
+  load checkpoint: 21.72 giay
+  inference sau warm-up: 2.769 giay
+  peak VRAM: 20.789 GB
+  output: (50,16), float32, finite
+
+Ket qua test thong luong ROS voi camera gia, joint-state live va GPU 3:
+  warm-up: 8.684 giay
+  cycle 0: 4.956 giay
+  raw_arm_jump: 0.026 rad
+  process exit code: 0
+  log: ~/Desktop/pelican_astribot_logs/00_local_synthetic_camera_dry.log
+
+Vi 2.769 > 1.0 giay, cau hinh hien tai la NO-GO cho robot that.
+
+Co the benchmark giam flow steps trong DRY-RUN:
+
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --device "$DEVICE" --inference-steps 4 --max-cycles 5 \
+    2>&1 | tee "$LOG_DIR/01_pelican_steps4_dry.log"
+
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --device "$DEVICE" --inference-steps 2 --max-cycles 5 \
+    2>&1 | tee "$LOG_DIR/02_pelican_steps2_dry.log"
+
+Giam inference steps thay doi sampling va co the lam giam policy quality. Khong
+duoc chi nhin latency roi chay robot that; phai validate task trong simulator.
+KHONG tang --max-inference-latency tren robot that chi de bo qua guard.
+
+
+6. THU TREN SIMULATOR
+---------------------
+
+Khoi dong vm_astribot simulator voi camera va cung ROS_DOMAIN_ID=25. Dry-run:
+
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --ros-config pelican_vla0.5_infer/configs/astribot_s1_sim_ros2.yaml \
+    --device "$DEVICE" --task "serving brewed coffee" --max-cycles 5 \
+    2>&1 | tee "$LOG_DIR/10_sim_dry.log"
+
+Chi khi dry-run sach, latency dat nguong va scene simulator dung domain Coffee,
+thu 1 cycle x 1 action. Doc prompt va moi nhap "s":
+
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --ros-config pelican_vla0.5_infer/configs/astribot_s1_sim_ros2.yaml \
+    --device "$DEVICE" --task "serving brewed coffee" \
+    --execute --prepare-ready-pose --execute-steps 1 --max-cycles 1 \
+    2>&1 | tee "$LOG_DIR/11_sim_1x1.log"
+
+Neu an toan, tang dan:
+  A. 1 cycle x 2 actions
+  B. 3 cycles x 2 actions
+  C. 3 cycles x 4 actions
+  D. continuous voi execute-steps 4 hoac 8
+
+Khong tang nhieu tham so cung luc. Moi muc phai xem raw_arm_jump, tracking va
+hanh vi task truoc khi sang muc ke tiep.
+
+
+7. ROBOT THAT - CHI KHI GO GATE DAT
+----------------------------------
+
+GO gate bat buoc:
+[ ] 3 camera topic dang publish lien tuc va decode dung RGB.
+[ ] Du 6 state stream, tuoi moi stream < 1 giay.
+[ ] Python 3.10 import du ROS va Pelican dependencies.
+[ ] GPU con >= 24 GB VRAM va khong co job tranh chap nang.
+[ ] Dry-run cung checkpoint/scene dat toi thieu 5 cycles.
+[ ] Inference latency <= 1.0 giay o cau hinh da validate.
+[ ] Simulator 1x1, 1x2 va multi-cycle deu an toan.
+[ ] Da danh gia rui ro do checkpoint train voi future offset +15.
+[ ] Scene/camera/anh sang dung task Coffee.
+[ ] Co operator, E-stop va workspace trong.
+
+Neu BAT KY dong nao chua dat: NO-GO, khong dung --execute.
+
+Khi tat ca GO gate dat, lan robot that dau tien chi 1 cycle x 1 action:
+
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --device "$DEVICE" --task "serving brewed coffee" \
+    --execute --prepare-ready-pose --execute-steps 1 --max-cycles 1 \
+    2>&1 | tee "$LOG_DIR/20_real_1x1.log"
+
+KHONG them --yes. Quan sat toan bo ready-pose va policy action.
+
+Neu 1x1 an toan, chay 3 cycles x 1 action:
+
+  scripts/run_astribot_inference.sh "$MODEL" \
+    --device "$DEVICE" --task "serving brewed coffee" \
+    --execute --prepare-ready-pose --execute-steps 1 --max-cycles 3 \
+    2>&1 | tee "$LOG_DIR/21_real_3x1.log"
+
+Chi sau khi tracking on dinh moi tang --execute-steps len 2. Khong bat dau
+robot that bang default 8 actions/chunk.
+
+
+8. THEO DOI KHI INFER
+---------------------
+
+Moi cycle in:
+  inference=<seconds>
+  raw_arm_jump=<radian>
+  grippers=[left, right]
+
+Tracking command-versus-measured-state:
+  OK:       max error <= 0.15 rad
+  WARNING:  max error > 0.15 rad
+  CRITICAL: max error > 0.30 rad
+
+Sau 3 CRITICAL lien tiep, runtime dung truoc command ke tiep. Khi thoat sau khi
+da command, runtime publish hold bang command da smooth gan nhat.
+
+Xem nhanh log:
+
+  grep -E 'WARNING|CRITICAL|stale|latency|inference=|raw_arm_jump' \
+    "$LOG_DIR"/*.log
+
+Neu co bat ky dau hieu sau, bam E-stop ngay:
+- rung/manh bat thuong;
+- di sai phia hoac roi khoi workspace;
+- va cham ban/do vat/than robot;
+- tracking error tang lien tuc;
+- camera bi dung/che trong khi robot dang chay.
+
+Luu y: runtime Pelican hien CHUA tu dong record video. Neu can bang chung thi
+record camera bang cong cu ROS/bridge rieng truoc khi execute.
+
+
+9. CHECKLIST TRUOC MOI LENH --execute
+-----------------------------------
+
+[ ] Day la simulator, HOAC tat ca real-robot GO gate muc 7 da dat.
+[ ] Dry-run cung checkpoint va cung task vua pass.
+[ ] Khong co missing/stale camera hoac state.
+[ ] Latency nho hon --max-inference-latency.
+[ ] GPU du VRAM, khong tranh chap voi training/job khac.
+[ ] Scene Coffee va camera placement dung domain train.
+[ ] Workspace torso/head/arms/grippers trong.
+[ ] Operator co mat va tay o E-stop.
+[ ] Khong co --yes.
+[ ] Khong co --disable-joint-limits.
+[ ] Lan dau chi --execute-steps 1 --max-cycles 1.
+[ ] Hieu rang --prepare-ready-pose se di chuyen full body.
+
+
+10. TRANG THAI DA KIEM THU / GIOI HAN CON LAI
+---------------------------------------------
+
+Da kiem thu trong repo nay:
+- 6/6 unit/regression tests pass.
+- Python compile, shell syntax va git diff check pass.
+- ROS 2 Humble Python 3.10 import rclpy/astribot_msgs thanh cong.
+- ROS bridge smoke test pass voi command publishers bi thay bang recorder gia.
+- Topic/type joint-state robot that khop YAML.
+- Observation read-only da tung pass voi 3 camera RGB 224x224 va state 16-D.
+- Checkpoint strict-load va inference end-to-end pass.
+- Dry-run ROS end-to-end voi 3 camera gia + 6 joint-state live pass 1 cycle;
+  command mode tat, khong publish robot command.
+- Output (50,16), float32, finite; peak VRAM 20.789 GB.
+- Joint/gripper limiter, asymmetric joint limits, NaN rejection, RGB conversion,
+  temporal history va ROS cleanup deu co regression test.
+
+Trang thai tai thoi diem cap nhat 2026-10-09:
+- 6 joint-state topics co publisher.
+- Khong co camera image topic tren ROS domain 25; live readiness se timeout.
+- Latency sau warm-up do duoc 2.769 giay > guard 1.0 giay.
+- Test ROS tong hop moi nhat do 4.956 giay > guard 1.0 giay.
+- Vi vay trang thai hien tai: NO-GO CHO ROBOT THAT.
+
+Chua duoc xac nhan an toan:
+- Policy quality khi giam --inference-steps.
+- Hanh vi task tren simulator theo quy trinh tang dan.
+- Chuyen dong ready-pose/policy tren robot that voi ban code hien tai.
+- Anh huong cua future image offset +15 den policy online.
+
+Thu tu bat buoc tiep theo:
+  camera bridge online -> dry-run 5 cycles -> latency <= 1 giay -> simulator
+  1x1/1x2/multi-cycle -> review log -> moi xem xet robot that.
+
+END

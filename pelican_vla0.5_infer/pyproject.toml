@@ -13,12 +13,14 @@ authors = [{ name = "The BaseVLA Authors" }]
 dependencies = [
     "torch>=2.4",
     "torchvision",
-    "transformers>=4.57",
+    "transformers>=4.57,<5.19",
     "safetensors",
     "numpy",
     "draccus",
     "huggingface_hub",
     "packaging",
+    "opencv-python",
+    "PyYAML",
 ]
 
 [tool.setuptools]

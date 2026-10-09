@@ -98,8 +98,10 @@ class PelicanVLA05Inference:
         norm_eps: float = 0.0,
         strict: bool = True,
     ):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.dtype = dtype or (torch.bfloat16 if self.device == "cuda" else torch.float32)
+        self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+        self.dtype = dtype or (
+            torch.bfloat16 if self.device.type == "cuda" else torch.float32
+        )
         self.camera_map = dict(camera_map)
         self.action_dim = action_dim
         self.delta_mask = None if delta_mask is None else np.asarray(delta_mask, dtype=bool)
@@ -109,6 +111,19 @@ class PelicanVLA05Inference:
         self.state_std = np.asarray(state_stats["std"], dtype=np.float32)
         self.action_mean = np.asarray(action_stats["mean"], dtype=np.float32)
         self.action_std = np.asarray(action_stats["std"], dtype=np.float32)
+
+        if self.state_mean.ndim != 1 or self.state_std.shape != self.state_mean.shape:
+            raise ValueError("state mean/std must be one-dimensional and have equal shapes")
+        if self.action_mean.ndim != 1 or self.action_std.shape != self.action_mean.shape:
+            raise ValueError("action mean/std must be one-dimensional and have equal shapes")
+        if self.action_mean.size < action_dim:
+            raise ValueError(
+                f"action stats contain {self.action_mean.size} values; action_dim={action_dim}"
+            )
+        if self.delta_mask is not None and self.delta_mask.shape != (action_dim,):
+            raise ValueError(
+                f"delta_mask has shape {self.delta_mask.shape}; expected {(action_dim,)}"
+            )
 
         if qwen3_vl_path:
             os.environ.setdefault("QWEN3_VL_PATH", qwen3_vl_path)
@@ -134,6 +149,26 @@ class PelicanVLA05Inference:
         for buf in self._buffers.values():
             buf.clear()
         self.policy.reset()
+
+    def set_image_history(
+        self, image_history: Mapping[str, Sequence[np.ndarray]]
+    ) -> None:
+        """Replace camera buffers with externally sampled RGB histories.
+
+        Robot runtimes should sample camera histories at their control rate and
+        call this method immediately before :meth:`infer`.  This keeps temporal
+        offsets (for example ``[-15, 0, 15]``) in control-frame units even when
+        one model inference takes longer than a camera frame.
+        """
+        missing = sorted(set(self.camera_map) - set(image_history))
+        if missing:
+            raise ValueError(f"image history is missing cameras: {missing}")
+        for host_cam, buffer in self._buffers.items():
+            frames = image_history[host_cam]
+            if len(frames) == 0:
+                raise ValueError(f"image history for {host_cam!r} is empty")
+            buffer.clear()
+            buffer.extend(_to_chw_float(frame) for frame in frames)
 
     def _temporal_stack(self, host_cam: str) -> tuple[torch.Tensor, bool]:
         buf = self._buffers[host_cam]
@@ -169,6 +204,8 @@ class PelicanVLA05Inference:
         images: Mapping[str, np.ndarray],
         state: Sequence[float],
         task: str,
+        *,
+        image_history: Mapping[str, Sequence[np.ndarray]] | None = None,
     ) -> np.ndarray:
         """Predict an action chunk for one timestep.
 
@@ -180,11 +217,18 @@ class PelicanVLA05Inference:
         Returns:
             ``(chunk_size, action_dim)`` array of absolute action targets.
         """
-        for host_cam in self.camera_map:
-            if host_cam in images:
-                self._buffers[host_cam].append(_to_chw_float(images[host_cam]))
+        if image_history is not None:
+            self.set_image_history(image_history)
+        else:
+            for host_cam in self.camera_map:
+                if host_cam in images:
+                    self._buffers[host_cam].append(_to_chw_float(images[host_cam]))
 
         state_raw = np.asarray(state, dtype=np.float32)
+        if state_raw.shape != self.state_mean.shape:
+            raise ValueError(
+                f"state has shape {state_raw.shape}; expected {self.state_mean.shape}"
+            )
         state_norm = self._normalize(state_raw, self.state_mean, self.state_std)
         state_t = torch.from_numpy(state_norm).float()
         if state_t.shape[-1] < self.max_state_dim:
@@ -209,7 +253,7 @@ class PelicanVLA05Inference:
 
         autocast = (
             torch.autocast(device_type="cuda", dtype=self.dtype)
-            if self.device == "cuda"
+            if self.device.type == "cuda"
             else torch.autocast(device_type="cpu", enabled=False)
         )
         with autocast:

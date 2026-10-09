@@ -3,9 +3,11 @@
 
 torch>=2.4
 torchvision
-transformers>=4.57      # provides models.qwen3_vl
+transformers>=4.57,<5.19  # 5.18 is the tested deployment version
 safetensors
 numpy
 draccus
 huggingface_hub
 packaging
+opencv-python
+PyYAML

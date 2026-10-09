@@ -71,6 +71,66 @@ Smoke-test the whole pipeline (random images, no robot needed):
 python pelicanvla05_infer.py --model_path /path/to/pretrained_model --action_dim 7
 ```
 
+## Astribot S1 deployment
+
+The Astribot entrypoint uses the same ROS 2 topics, 16-D vector order and
+hardware safety guards as the sibling Diffusion Policy runtime. The model input
+order is:
+
+```text
+[left_arm_j0..j6, right_arm_j0..j6, left_gripper, right_gripper]
+```
+
+ROS 2 Humble and the local `astribot_msgs` overlay use Python 3.10. The existing
+`pelican_vla` training environment on this machine uses Python 3.12 and cannot
+load Humble's `rclpy` native extension. Install the Pelican dependencies into
+the Python 3.10 Diffusion Policy runtime once:
+
+```bash
+/home/anhnb9/Documents/diffusion_policy/env/bin/python -m pip install \
+  -r pelican_vla0.5_infer/requirements.txt
+```
+
+The launcher defaults to that Python 3.10 runtime; override it with
+`PELICAN_PYTHON=/path/to/python3.10` if needed. Build and source
+`astribot_msgs`, then run a command-free smoke test first:
+
+```bash
+scripts/run_astribot_inference.sh \
+  checkpoints/pelican_astri_coffee_full_ft/best_model \
+  --max-cycles 5
+```
+
+For the MuJoCo Astribot topics, add:
+
+```bash
+--ros-config pelican_vla0.5_infer/configs/astribot_s1_sim_ros2.yaml
+```
+
+Only after checking camera/state freshness, inference latency, raw arm jumps,
+and gripper units should command publication be enabled:
+
+```bash
+scripts/run_astribot_inference.sh \
+  checkpoints/pelican_astri_coffee_full_ft/best_model \
+  --execute --prepare-ready-pose --execute-steps 8
+```
+
+Without `--execute` the process never publishes commands. Execute mode adds S1
+joint limits, a 0.15-rad per-policy-step arm limit, a 20-unit gripper limit, a
+250 Hz velocity-limited arm stream, stale-sensor rejection, tracking-error
+abort, a 1-second inference-latency limit, and a final hold command. If the
+checkpoint is too slow, `--inference-steps N` can reduce the flow-matching
+iterations, but policy quality must be revalidated in dry-run/simulation. The
+physical and simulator ROS mappings are in
+`configs/astribot_s1_ros2.yaml` and `configs/astribot_s1_sim_ros2.yaml`.
+
+The current checkpoint was trained with temporal image offsets `[-15, 0, 15]`.
+Because a live controller cannot access the future `+15` frame, online
+inference uses the newest available frame for that slot and prints a startup
+warning. This train/deployment mismatch should be included in robot validation;
+future training runs intended for online control should use causal offsets.
+
 ## Checkpoint layout
 
 `from_pretrained` accepts a directory containing either a single
