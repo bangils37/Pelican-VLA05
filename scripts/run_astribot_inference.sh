@@ -33,6 +33,10 @@ set +u
 source "$ROS_SETUP"
 # shellcheck source=/dev/null
 source "$ASTRIBOT_WS/install/setup.bash"
+if [[ -f "$PROJECT_ROOT/../diffusion_policy/cyclone_dds_setup.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$PROJECT_ROOT/../diffusion_policy/cyclone_dds_setup.sh"
+fi
 set -u
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-25}"
