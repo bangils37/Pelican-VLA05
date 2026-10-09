@@ -19,6 +19,7 @@ import logging
 from pathlib import Path
 import sys
 import os
+import re
 
 import numpy as np
 import torch
@@ -108,6 +109,8 @@ def parse_args():
     parser.add_argument("--use_wandb", action="store_true", help="Enable WandB logging")
     parser.add_argument("--wandb_project", type=str, default="astribot_making_coffee", help="WandB project name")
     parser.add_argument("--wandb_run_name", type=str, default=None, help="WandB run name")
+    parser.add_argument("--start_step", type=int, default=None, help="Initial global step (auto-detected if loading checkpoint-XXXXXX)")
+    parser.add_argument("--wandb_run_id", type=str, default=None, help="WandB run ID to resume")
     return parser.parse_args()
 
 
@@ -420,7 +423,25 @@ def main():
         progress = float(current_step - args.warmup_steps) / float(max(1, args.max_steps - args.warmup_steps))
         return max(0.1, 0.5 * (1.0 + torch.cos(torch.tensor(progress * 3.141592653589793)).item()))
 
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    # Determine initial global_step
+    start_step = 0
+    if args.start_step is not None:
+        start_step = args.start_step
+    else:
+        p_name = Path(args.pretrained_model_path).name
+        m = re.search(r"checkpoint-(\d+)", p_name)
+        if m:
+            start_step = int(m.group(1))
+            logging.info(f"Auto-detected starting global_step={start_step} from checkpoint {p_name}")
+
+    global_step = start_step
+
+    for group in optimizer.param_groups:
+        group["initial_lr"] = group["lr"]
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda, last_epoch=global_step - 1 if global_step > 0 else -1
+    )
 
     # 4. Logger
     tb_writer = None
@@ -428,14 +449,17 @@ def main():
         tb_writer = SummaryWriter(log_dir=str(output_dir / "logs"))
         if args.use_wandb:
             import wandb
-            wandb.init(
-                project=args.wandb_project,
-                name=args.wandb_run_name,
-                config=vars(args),
-            )
+            wandb_init_kwargs = {
+                "project": args.wandb_project,
+                "name": args.wandb_run_name,
+                "config": vars(args),
+            }
+            if args.wandb_run_id:
+                wandb_init_kwargs["id"] = args.wandb_run_id
+                wandb_init_kwargs["resume"] = "allow"
+            wandb.init(**wandb_init_kwargs)
 
     # 5. Training loop
-    global_step = 0
     best_val_loss = float("inf")
     best_metric_file = output_dir / "best_model" / "best_val_loss.txt"
     if best_metric_file.is_file():
@@ -447,7 +471,10 @@ def main():
             logging.warning(f"Could not read existing best_val_loss.txt: {e}")
     policy.train()
 
-    pbar = tqdm(total=args.max_steps, desc="Training Pelican-VLA", disable=not is_main_process)
+    if train_sampler is not None and global_step > 0:
+        current_epoch = int((global_step * world_size * args.batch_size) / len(train_dataset))
+        train_sampler.set_epoch(current_epoch)
+    pbar = tqdm(total=args.max_steps, initial=global_step, desc="Training Pelican-VLA", disable=not is_main_process)
     data_iter = iter(train_dataloader)
 
     while global_step < args.max_steps:

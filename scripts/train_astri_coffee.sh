@@ -18,7 +18,10 @@ DATASET_PATH="/home/aitt/data/serving_brewed_coffee_lrb_annotated"
 OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee_full_ft"
 
 # Pretrained model / Checkpoint to continue from
-if [ -d "$OUTPUT_DIR/best_model" ]; then
+LATEST_CKPT=$(ls -td "$OUTPUT_DIR"/checkpoint-* 2>/dev/null | head -n1)
+if [ -n "$LATEST_CKPT" ] && [ -d "$LATEST_CKPT" ]; then
+    DEFAULT_PRETRAINED="$LATEST_CKPT"
+elif [ -d "$OUTPUT_DIR/best_model" ]; then
     DEFAULT_PRETRAINED="$OUTPUT_DIR/best_model"
 else
     DEFAULT_PRETRAINED="$PROJECT_ROOT/pretrained_model/pelican_vla05"
@@ -55,9 +58,19 @@ USE_WANDB=${USE_WANDB:-1}        # 1 to enable W&B, 0 to disable
 WANDB_PROJECT=${WANDB_PROJECT:-"astribot_making_coffee"}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-"pelican_vla05_continue_$(date +%Y%m%d_%H%M%S)"}
 
+WANDB_RUN_ID=${WANDB_RUN_ID:-"71zdsisb"}
+
 WANDB_ARGS=""
 if [ "$USE_WANDB" -eq 1 ]; then
     WANDB_ARGS="--use_wandb --wandb_project $WANDB_PROJECT --wandb_run_name $WANDB_RUN_NAME"
+    if [ -n "$WANDB_RUN_ID" ]; then
+        WANDB_ARGS="$WANDB_ARGS --wandb_run_id $WANDB_RUN_ID"
+    fi
+fi
+
+EXTRA_ARGS=""
+if [ -n "$START_STEP" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --start_step $START_STEP"
 fi
 
 echo "=========================================================="
@@ -101,7 +114,7 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --val_ratio "$VAL_RATIO" \
         --eval_steps "$EVAL_STEPS" \
         --eval_batches "$EVAL_BATCHES" \
-        $WANDB_ARGS
+        $WANDB_ARGS $EXTRA_ARGS
 else
     echo "Running Single-GPU Full Fine-Tuning on GPU $GPU_ID..."
     CUDA_VISIBLE_DEVICES=$GPU_ID "$CONDA_ENV_PYTHON" "$PROJECT_ROOT/training/train.py" \
@@ -121,5 +134,5 @@ else
         --val_ratio "$VAL_RATIO" \
         --eval_steps "$EVAL_STEPS" \
         --eval_batches "$EVAL_BATCHES" \
-        $WANDB_ARGS
+        $WANDB_ARGS $EXTRA_ARGS
 fi
