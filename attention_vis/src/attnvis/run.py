@@ -50,6 +50,9 @@ def _dump_dense_args(args) -> list[str]:
         a += ["--label", args.label]
     if args.no_pngs:
         a += ["--no-pngs"]
+    for key in ("method", "action_step", "action_dim", "seed", "target_sign"):
+        if hasattr(args, key):
+            a += ["--" + key.replace("_", "-"), str(getattr(args, key))]
     return a
 
 
@@ -96,6 +99,8 @@ def main():
                     help="Run even if preflight has blocking issues")
     ap.add_argument("--online", action="store_true",
                     help="Allow HF/transformers to go online (default is offline)")
+    from attnvis.explain_options import add_explain_options
+    add_explain_options(ap)
     args = ap.parse_args()
 
     rep = PF.check(args.scenes, check_paths=not args.no_check_paths)

@@ -232,3 +232,68 @@ v3 packs several episodes back-to-back in one MP4, so the offset matters)
 ## License
 
 Apache-2.0. Weights and third-party code keep their own licenses.
+
+## Decoder Attention Rollout and gradient-weighted rollout
+
+`run` and `dump_dense` accept `--method attention|rollout|gradient_rollout`.
+The default `attention` preserves the original two-hop visualization.
+
+```bash
+python -m attnvis run --scenes robotwin:adjust_bottle:0 --nframes 3 \
+  --exp explain --method rollout --action-step 0 --seed 7
+
+python -m attnvis run --scenes robotwin:adjust_bottle:0 --nframes 3 \
+  --exp explain --method gradient_rollout --action-step 0 --action-dim 0 --seed 7
+```
+
+Use the same environment/path setup as above. `PELICANVLA_CAPTURE` must be
+`auto`: these methods preserve the checkpoint's actual bottleneck topology.
+New method directories have `__rollout` / `__gradient_rollout` suffixes.
+Alongside the standard PNG overlays and camera archives, `raw/frame_*.npz`
+stores action-token-to-image-token maps, token grids per camera and image-token
+indices; `raw/frame_*.json` records checkpoint, method, seed, target and scope.
+Do not compare reruns with different seeds as if their input noise were equal.
+Use separate `--exp` values when comparing targets or seeds (reruns overwrite).
+
+### What is implemented
+
+- **Rollout** follows residual addition, head averaging and row normalization
+  from [Abnar & Zuidema (2020)](https://arxiv.org/abs/2005.00928).
+  It propagates through a combined prefix/continuation/suffix graph, layer by
+  layer. Cached keys use provenance from the previous layer, and suffix keys
+  are restricted to bottleneck slots when enabled. It uses the last denoising
+  call. `--action-step` selects its action token; rollout is not dimension-specific.
+- **Gradient rollout** uses positive gradient × attention, averaged over heads,
+  then residual propagation without row normalization. Its scalar target is
+  `target_sign * normalized_action[action_step, action_dim]`; `--target-sign -1`
+  explains decreasing that component. Earlier Euler iterations are held fixed;
+  only context and the final Euler update are recomputed with gradients. This
+  is a *conditional final-step* explanation, not a full solver derivative.
+  Weights stay frozen and production inference code is unchanged.
+- Camera overlays undo the input letterbox padding. Raw token maps retain their
+  temporal token axis, but the existing adapter repeats a single frame into
+  temporal slots: these outputs must NOT be described as real video temporal
+  attribution. They cover Qwen language-decoder image tokens, not relevance
+  through the vision encoder or Cosmos branch.
+
+### Chefer CVPR 2021: aggregation core, not an integrated LRP backend
+
+[Transformer Interpretability Beyond Attention Visualization](https://arxiv.org/abs/2012.09838)
+uses gradient-weighted **LRP relevance**, not raw attention. The pure function
+`attnvis.core.attribution.chefer_weights(relevance, gradients)` implements its
+positive product/head-fusion stage for `[layers, heads, queries, keys]` tensors.
+It can feed `cached_rollout(..., normalize=False)` once actual attention
+relevance has been computed.
+
+**Full Chefer attribution for Pelican is not implemented yet.** Qwen/Pelican
+currently has no `relprop` backend for its attention, residual, RMSNorm, gated
+MLP, KV-cache and action-head operations. `gradient_rollout` is deliberately
+not named `chefer` or `LRP`. Do not report it as a reproduction of CVPR 2021.
+The original implementation is available in the
+[authors' repository](https://github.com/hila-chefer/Transformer-Explainability).
+
+Tests (requires the Pelican torch/transformers environment, no weights):
+
+```bash
+PYTHONPATH=attention_vis/src python -m unittest discover -s attention_vis/tests -v
+```

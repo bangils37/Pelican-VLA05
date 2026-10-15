@@ -94,7 +94,8 @@ def _save_contact_strip(path: Path, rgbs: list, heats: list, frames: list, vmax:
 
 
 def dump_one(exp: str, scene_specs: list, nframes: int,
-             ckpt: str | None = None, label: str | None = None, save_pngs: bool = True) -> None:
+             ckpt: str | None = None, label: str | None = None, save_pngs: bool = True, method="attention", action_step=0, action_dim=0,
+             seed=0, target_sign=1) -> None:
     import torch  # lazy: pure CPU paths don't need it
 
     plan = []
@@ -106,6 +107,8 @@ def dump_one(exp: str, scene_specs: list, nframes: int,
         print(f"[dense] prefetch {_scene_tag(src,suite,ep)} ep{ep}: {len(ts)} frames {ts}", flush=True)
 
     model_key = label or ("pelicanvla_custom" if ckpt is not None else "pelicanvla")
+    if method != "attention":
+        model_key += "__" + method
     adapter = _make_adapter(ckpt)
     adapter.load()
     print(f"[dense] loaded {model_key}", flush=True)
@@ -115,7 +118,17 @@ def dump_one(exp: str, scene_specs: list, nframes: int,
         outdir.mkdir(parents=True, exist_ok=True)
         acc: dict[str, dict[str, list]] = {}
         for t in ts:
-            res = adapter.attention(frames[t])
+            res = (adapter.attention(frames[t]) if method == "attention" else
+                   adapter.explain(frames[t], method=method, action_step=action_step,
+                                   action_dim=action_dim, seed=seed, target_sign=target_sign))
+            if method != "attention":
+                rawdir = outdir / "raw"
+                rawdir.mkdir(exist_ok=True)
+                np.savez_compressed(rawdir / f"frame_{t:06d}.npz",
+                    action_to_image=res.raw["action_to_image"],
+                    image_columns=res.raw["image_columns"], grid_thw=res.raw["grid_thw"],
+                    **{f"tokens_{cam}": v for cam,v in res.raw["token_maps"].items()})
+                (rawdir / f"frame_{t:06d}.json").write_text(json.dumps(res.raw["metadata"], indent=2))
             for cam, heat in res.heat.items():
                 d = acc.setdefault(cam, {"heat": [], "rgb": []})
                 d["heat"].append(np.asarray(heat, dtype=np.float32))
@@ -142,7 +155,8 @@ def dump_one(exp: str, scene_specs: list, nframes: int,
                                     list(rgb_stk), list(heat_stk), ts, vfull)
         (outdir / "manifest.json").write_text(json.dumps(
             {"exp": exp, "scene": stag, "source": src, "suite": suite, "episode": ep,
-             "model": model_key, "views": list(acc.keys()), "frames": ts},
+             "model": model_key, "method": method, "seed": seed,
+             "action_step": action_step, "action_dim": action_dim, "target_sign": target_sign, "views": list(acc.keys()), "frames": ts},
             ensure_ascii=False, indent=2))
         print(f"[dense] {model_key} {stag}: views={list(acc.keys())} -> {outdir}", flush=True)
 
@@ -166,11 +180,15 @@ def main():
     ap.add_argument("--nframes", type=int, default=30)
     ap.add_argument("--no-pngs", action="store_true",
                     help="Store only npz, skip per-frame PNG and contact strip")
+    from attnvis.explain_options import add_explain_options
+    add_explain_options(ap)
     args = ap.parse_args()
 
     scene_specs = [_parse_scene(s) for s in args.scenes]
     dump_one(args.exp, scene_specs, args.nframes,
-             ckpt=args.ckpt, label=args.label, save_pngs=not args.no_pngs)
+             ckpt=args.ckpt, label=args.label, save_pngs=not args.no_pngs, method=args.method,
+             action_step=args.action_step, action_dim=args.action_dim, seed=args.seed,
+             target_sign=args.target_sign)
 
 
 if __name__ == "__main__":

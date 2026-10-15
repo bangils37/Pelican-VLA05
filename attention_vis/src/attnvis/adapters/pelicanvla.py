@@ -247,6 +247,12 @@ class PelicanVLAAdapter(ModelAdapter):
                 inputs[k] = v
         return inputs
 
+    def explain(self, frame: Frame, method="rollout", **kwargs) -> AttnResult:
+        if self.policy is None:
+            raise RuntimeError("call load() before explain()")
+        from .rollout import explain
+        return explain(self, frame, method, **kwargs)
+
     def attention(self, frame: Frame) -> AttnResult:
         """One frame -> two-hop / direct capture -> per-camera action→image heatmap."""
         import torch
