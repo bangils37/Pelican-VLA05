@@ -110,7 +110,7 @@ def _writer(directory, queues, stop, ready, status, fps, video):
 class SessionRecorder:
     def __init__(self, directory, metadata, *, fps=30., video=True, trace_queue=2,
                  event_queue=4096, video_queue=8):
-        if fps <= 0 or min(trace_queue,event_queue,video_queue) <= 0:
+        if not np.isfinite(fps) or fps <= 0 or min(trace_queue,event_queue,video_queue) <= 0:
             raise ValueError('Recording FPS and queue capacities must be positive')
         self.path = Path(directory).expanduser()/(
             datetime.now().astimezone().strftime('%Y%m%dT%H%M%S%z')+'_'+uuid.uuid4().hex[:8])
@@ -204,7 +204,9 @@ class SessionRecorder:
         worker = json.loads(writer_file.read_text()) if writer_file.exists() else {}
         self.metadata.update(outcome=outcome,accepted=dict(self.accepted),dropped=dict(self.dropped),
             writer=worker,flush_timed_out=timed_out,complete=(not timed_out and
-                not worker.get('error') and bool(worker) and not any(self.dropped.values())))
+                not worker.get('error') and worker.get('closed') is True and
+                all(worker.get('written',{}).get(k,0) == self.accepted[k] for k in self.queues) and
+                not any(self.dropped.values())))
         _write_json(self.path/'session.json',self.metadata)
         print(f'Session saved: {self.path} complete={self.metadata["complete"]} drops={dict(self.dropped)}')
 
@@ -246,8 +248,16 @@ def decode_history(archive, cameras):
         if f'history_indices_{cam}' not in archive:  # schema-1 dense traces
             result[cam] = frames
             continue
-        length = int(archive[f'history_length_{cam}'])
-        indices = archive[f'history_indices_{cam}']
+        length_value = np.asarray(archive[f'history_length_{cam}'])
+        indices = np.asarray(archive[f'history_indices_{cam}'])
+        if length_value.ndim != 0 or length_value.dtype.kind not in 'iu':
+            raise ValueError(f'Invalid history length: {cam}')
+        length = int(length_value)
+        if (not 1 <= length <= 32 or indices.ndim != 1 or indices.dtype.kind not in 'iu'
+                or len(indices) != len(frames) or not len(indices)
+                or np.any(indices < 0) or np.any(indices >= length)
+                or np.any(np.diff(indices.astype(np.int64)) <= 0)):
+            raise ValueError(f'Invalid sparse history indices: {cam}')
         history = [frames[-1]]*length
         for index,frame in zip(indices,frames): history[int(index)] = frame
         result[cam] = history

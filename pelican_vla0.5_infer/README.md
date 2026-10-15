@@ -245,3 +245,70 @@ Attention capture/backprop never runs inside the robot control loop.
 The decoder attention maps still cover the Qwen image-token path, not full
 Cosmos/vision-tower attribution. `gradient_rollout` remains a conditional
 final-Euler-step method; full Chefer/LRP is not implemented.
+
+### Repeatable regression tests and debugging
+
+Run from the repository root with the inference environment's Python:
+
+```bash
+python scripts/test_pelican.py
+```
+
+This runs runtime, recorder/HOME, corruption/failure-injection, and attention
+suites in separate processes, including plain function tests that unittest
+otherwise misses. It sets the attention module path itself. Logs and
+`report.json` go to a unique directory under `/tmp/pelican-tests`; any failed
+suite or timeout returns a nonzero exit code. Use `--output DIR` to retain them
+elsewhere. Tests do not command hardware.
+
+For checkpoint + ROS integration, source ROS Humble and the Astribot message
+overlay first, and set `QWEN3_VL_PATH`, `COSMOS_TOKENIZER_PATH`, and
+`CUDA_VISIBLE_DEVICES` for the deployment environment:
+
+```bash
+python scripts/test_pelican_ros.py \
+  --model-path checkpoints/pelican_astri_coffee_full_ft/best_model
+```
+
+The harness creates its own simulator, localhost-only ROS domain 197 and a
+unique `/pelican_test_<uuid>` prefix for **all** camera, state and command topics.
+It refuses production topic configurations. It checks missing-head rejection,
+standalone HOME, dry-run without commands, normal execute with HOME and execute
+with HOME disabled. Every generated session is audited; MP4s are fully decoded.
+The simulator follows commands immediately, so this verifies software plumbing,
+not physical tracking, collision clearance or robot calibration. Logs, sessions,
+configuration and JSON results remain under `/tmp/pelican-ros-tests`.
+Do not run the older server-local `dry_run_mock.sh` on a hardware ROS domain.
+
+Audit an existing session without loading a checkpoint or connecting to ROS:
+
+```bash
+python scripts/validate_session.py /path/to/session --expect-home yes --expect-commands yes
+```
+
+The auditor checks manifest/writer counts, dropped records, event JSON,
+trace pairs, finite action/state tensors, sparse frame indices, RNG buffers and
+video frame counts. `--skip-video` skips expensive decoding. Exit code 1 means
+invalid/incomplete data; inspect the printed errors. A valid archive still does
+not prove model replay equality; use `scripts/explain_session.py` for that check.
+
+Measure recording overhead with a real checkpoint and replay inputs:
+
+```bash
+python scripts/benchmark_pelican_recorder.py \
+  --model-path checkpoints/pelican_astri_coffee_full_ft/best_model \
+  --dataset ../diffusion_policy/data/replay/astribot_s1/extracted/coffee_full.zarr \
+  --pairs 20 --output /tmp/pelican-benchmarks
+```
+
+The benchmark warms the model, alternates baseline/recording in ABBA order,
+records three camera streams plus synthetic joint events, and reports individual
+samples, p50/p95/p99, median overhead and recorder completeness. CPU submission
+latency is reported separately. This is a controlled replay workload, not a
+worst-case latency guarantee. Avoid concurrent GPU jobs when comparing results.
+
+When debugging, start with the failing suite's `.log` or integration case log,
+then `session.json` (`complete`, `dropped`, `writer.error`) and `events.jsonl`.
+The recorder now marks sessions incomplete if a queue payload was accepted but
+lost during asynchronous serialization. Corrupt sparse history and nonfinite
+replay tolerances are rejected instead of producing misleading explanations.

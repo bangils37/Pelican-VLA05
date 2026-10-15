@@ -2,6 +2,7 @@
 """Replay a recorded Pelican cycle and generate decoder attention offline."""
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -21,6 +22,8 @@ def main():
     p.add_argument('--replay-atol',type=float,default=None,
         help='Maximum action error in training-standard-deviation units (default: four dtype eps, floor 1e-5)')
     a=p.parse_args()
+    if a.replay_atol is not None and (not math.isfinite(a.replay_atol) or a.replay_atol < 0):
+        p.error("--replay-atol must be finite and nonnegative")
     meta=json.loads((a.session/'session.json').read_text())
     name=f'cycle_{a.cycle:06d}'
     cycle=json.loads((a.session/'cycles'/f'{name}.json').read_text())
