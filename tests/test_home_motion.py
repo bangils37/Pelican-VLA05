@@ -48,6 +48,18 @@ class MotionTests(unittest.TestCase):
         self.assertEqual(n.sent,[])
         self.assertIsNone(n._target)
 
+    def test_joint_trace_keeps_all_source_measurements(self):
+        n=self.node(); records=[]
+        n.recorder=SimpleNamespace(event=lambda kind,**value:records.append((kind,value)))
+        callback=MethodType(method('_on_joint'),n)
+        msg=SimpleNamespace(position=[.1,.2],velocity=[.3,.4],acceleration=[.5,.6],
+            torque=[.7,.8],mode=1,name=['h0','h1'],
+            header=SimpleNamespace(stamp=SimpleNamespace(sec=12,nanosec=34)))
+        callback(msg,'head')
+        self.assertEqual(records[0][1]['source']['velocity'],[.3,.4])
+        self.assertEqual(records[0][1]['source']['torque'],[.7,.8])
+        self.assertEqual(records[0][1]['source_stamp'],{'sec':12,'nanosec':34})
+
     def test_invalid_pose_rejected(self):
         n=self.node();pose=dict(S1_HOME_POSE,head=np.array([np.nan,0.]))
         with self.assertRaises(ValueError):n.move_to_pose(pose,1.,100.,1.)

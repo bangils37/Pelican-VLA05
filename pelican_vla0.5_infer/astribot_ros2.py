@@ -218,6 +218,9 @@ class AstribotS1Node(Node):
             self._part_times[part] = time.monotonic()
         if self.recorder:
             self.recorder.event("joint_state",part=part,position=positions[:dof].copy(),
+                source=dict(mode=int(message.mode),names=list(message.name),
+                    position=list(message.position),velocity=list(message.velocity),
+                    acceleration=list(message.acceleration),torque=list(message.torque)),
                 source_stamp={"sec":message.header.stamp.sec,"nanosec":message.header.stamp.nanosec})
 
     def _sample(self) -> None:

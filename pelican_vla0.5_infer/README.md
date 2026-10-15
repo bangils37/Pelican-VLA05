@@ -171,7 +171,8 @@ Every session contains:
   normalization stats, camera layout, tokenizer paths, library versions,
   outcome, writer errors and accepted/dropped record counts.
 - `console.log`, `events.jsonl`: runtime console output, full-body measured joint
-  positions with source stamps, raw/limited policy commands and tracking
+  positions plus source names/mode/velocity/acceleration/torque with source stamps,
+  raw/limited policy commands and tracking
   diagnostics, and actual published commands (including 250 Hz arm streaming,
   READY/HOME and hold). Monotonic timestamps align these records.
 - `videos/<camera>.mp4`: inference-resolution camera videos, default 30 FPS.
