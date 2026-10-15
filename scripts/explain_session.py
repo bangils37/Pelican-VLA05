@@ -18,6 +18,8 @@ def main():
     p.add_argument('--action-step',type=int,default=0)
     p.add_argument('--action-dim',type=int,default=0)
     p.add_argument('--device',default='cuda:0')
+    p.add_argument('--replay-atol',type=float,default=None,
+        help='Maximum action error in training-standard-deviation units (default: four dtype eps, floor 1e-5)')
     a=p.parse_args()
     meta=json.loads((a.session/'session.json').read_text())
     name=f'cycle_{a.cycle:06d}'
@@ -57,9 +59,13 @@ def main():
     restore_rng()
     actions=engine.infer({},z['state'],cycle['task'],image_history=history)
     difference=float(np.max(np.abs(actions-z['actions'])))
-    print(f'Replay action max absolute error: {difference:.8g}')
-    if not np.allclose(actions,z['actions'],rtol=1e-3,atol=1e-3):
-        raise RuntimeError('Replay does not reproduce recorded actions; refusing misleading explanation')
+    std=engine._safe_std(engine.action_std[:16])
+    normalized_error=float(np.max(np.abs(actions-z['actions'])/std))
+    tolerance=max(1e-5,4*torch.finfo(engine.dtype).eps) if a.replay_atol is None else a.replay_atol
+    if tolerance < 0: raise ValueError('replay-atol must be nonnegative')
+    print(f'Replay error: raw={difference:.8g}, normalized={normalized_error:.8g}, tolerance={tolerance:.8g}')
+    if not np.isfinite(normalized_error) or normalized_error > tolerance:
+        raise RuntimeError('Replay exceeds normalized action tolerance; refusing misleading explanation')
     adapter=PelicanVLAAdapter(ckpt=str(model_path))
     adapter.policy=engine.policy; adapter.config=engine.policy.config
     adapter._device=str(engine.device); adapter._merge=engine.policy.model.vlm.config.vision_config.spatial_merge_size
@@ -77,7 +83,9 @@ def main():
         np.savez(out/f'{cam}.npz',heat=heat,rgb=frame.rgb[cam],tokens=result.raw['token_maps'][cam])
         Image.fromarray((255*blend(frame.rgb[cam],heat,'turbo',vmin=0,
             vmax=max(float(np.percentile(heat,99.5)),1e-20),alpha=.5)).astype(np.uint8)).save(out/f'{cam}.png')
-    result.raw['metadata'].update(replay_max_absolute_error=difference,source_cycle=a.cycle)
+    result.raw['metadata'].update(replay_max_absolute_error=difference,
+        replay_max_normalized_error=normalized_error,replay_normalized_tolerance=tolerance,
+        replay_bitwise_equal=bool(np.array_equal(actions,z['actions'])),source_cycle=a.cycle)
     (out/'metadata.json').write_text(json.dumps(result.raw['metadata'],indent=2))
     print(out)
 

@@ -229,7 +229,13 @@ python scripts/explain_session.py /path/to/session --cycle 0 \
 
 The tool reconstructs the inference batch using the recorded real history and
 RNG state, checks replay actions against the saved chunk, and refuses to produce
-an explanation if replay differs beyond tolerance. It saves PNG overlays, raw
+an explanation if replay differs beyond tolerance. Errors are compared in
+training-standard-deviation units (not mixed radians/gripper units); the default
+absolute normalized tolerance is four compute-dtype epsilons, floored at 1e-5
+(0.03125 for BF16). Use `--replay-atol` to require a tighter tolerance. Reports
+include raw/normalized error, threshold and whether replay was bitwise equal.
+Identical input tensors and RNG do not guarantee bitwise floating-point results
+across processes; treat accepted nonzero error as approximate numerical replay. It saves PNG overlays, raw
 heat/token maps and replay error under `session/explanations/`. It checks
 checkpoint size/mtime identity, not cryptographic identity; keep the same model,
 processor assets and software environment. CUDA recordings require CUDA replay.
