@@ -14,10 +14,10 @@ build/
 .pytest_cache/
 .ipynb_checkpoints/
 
-# --- generated data / artifacts ---
-*.npz
-*.npy
-logs/
+# --- datasets (large, stored outside git or symlinked) ---
+data/
+
+# --- model weights & checkpoints ---
 checkpoints/
 pretrained_model/
 *.pt
@@ -26,6 +26,32 @@ pretrained_model/
 *.safetensors
 *.tar
 *.tar.gz
+*.npz
+*.npy
+
+# --- inference logs & session recordings ---
+# Ignore everything inside logs/ except the skeleton .gitkeep markers.
+logs/**
+!logs/sessions/
+!logs/sessions/.gitkeep
+!logs/astribot_legacy/
+!logs/astribot_legacy/.gitkeep
+!logs/.gitkeep
+
+# --- media ---
+*.mp4
+*.avi
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.gif
+
+# --- experiment tracking ---
+wandb/
+*.log
+*.bak
+runs/
 
 # --- env / editor / os ---
 .env
@@ -33,8 +59,3 @@ pretrained_model/
 .DS_Store
 .vscode/
 .idea/
-
-# --- wandb & logs ---
-wandb/
-*.log
-*.bak
