@@ -92,6 +92,9 @@ class AstribotS1Node(Node):
     ) -> None:
         super().__init__("pelican_vla05_astribot_s1")
         self._lock = threading.RLock()
+        self.recorder = None
+        self._history_stamps = deque(maxlen=history_depth)
+        self._last_commands = {}
         self._camera_shapes = dict(camera_shapes)
         self._required_parts = tuple(ros_config.get("required_state_parts", PART_KEYS))
         self._state_parts = tuple(dict.fromkeys((*PART_KEYS, *self._required_parts)))
@@ -100,6 +103,7 @@ class AstribotS1Node(Node):
             raise ValueError(f"unknown state parts: {unknown}")
         self._latest_images: dict[str, np.ndarray] = {}
         self._image_times = {key: None for key in self._camera_shapes}
+        self._image_source_stamps = {}
         self._image_history = {
             key: deque(maxlen=history_depth) for key in self._camera_shapes
         }
@@ -195,6 +199,7 @@ class AstribotS1Node(Node):
         with self._lock:
             self._latest_images[key] = rgb
             self._image_times[key] = time.monotonic()
+            self._image_source_stamps[key] = dict(sec=message.header.stamp.sec,nanosec=message.header.stamp.nanosec)
             self._decode_errors.pop(key, None)
 
     def _on_joint(self, message: RobotJointState, part: str) -> None:
@@ -211,6 +216,9 @@ class AstribotS1Node(Node):
         with self._lock:
             self._parts[part] = positions[:dof].copy()
             self._part_times[part] = time.monotonic()
+        if self.recorder:
+            self.recorder.event("joint_state",part=part,position=positions[:dof].copy(),
+                source_stamp={"sec":message.header.stamp.sec,"nanosec":message.header.stamp.nanosec})
 
     def _sample(self) -> None:
         with self._lock:
@@ -230,6 +238,11 @@ class AstribotS1Node(Node):
             for key in self._camera_shapes:
                 self._image_history[key].append(self._latest_images[key].copy())
             self._state_history.append(pack_vector(self._parts))
+            now = time.monotonic()
+            self._history_stamps.append(dict(sample=now,images=dict(self._image_times),parts=dict(self._part_times),image_source_stamps=dict(self._image_source_stamps)))
+            frames = dict(self._latest_images)
+        if self.recorder:
+            self.recorder.frames(frames,now)
 
     def readiness(self) -> tuple[bool, str]:
         with self._lock:
@@ -254,6 +267,12 @@ class AstribotS1Node(Node):
                 {key: list(history) for key, history in self._image_history.items()},
                 list(self._state_history),
             )
+
+    def trace_snapshot(self):
+        with self._lock:
+            return ({key:list(value) for key,value in self._image_history.items()},
+                    list(self._state_history),list(self._history_stamps),
+                    {key:value.copy() for key,value in self._parts.items()})
 
     def input_ages(self) -> dict[str, float]:
         now = time.monotonic()
@@ -286,6 +305,7 @@ class AstribotS1Node(Node):
             for history in self._image_history.values():
                 history.clear()
             self._state_history.clear()
+            self._history_stamps.clear()
             self._history_not_before = time.monotonic()
 
     def _publish_part(self, part: str, positions: Sequence[float]) -> None:
@@ -296,6 +316,11 @@ class AstribotS1Node(Node):
             message.name = list(PART_JOINT_NAMES[part])
         message.command = [float(value) for value in positions]
         self._command_publishers[part].publish(message)
+        with self._lock:
+            self._last_commands[part] = np.asarray(positions).copy()
+        if self.recorder:
+            self.recorder.event("published_command",part=part,command=np.asarray(positions).copy(),
+                source_stamp={"sec":message.header.stamp.sec,"nanosec":message.header.stamp.nanosec})
 
     def move_to_pose(
         self,
@@ -304,7 +329,12 @@ class AstribotS1Node(Node):
         rate_hz: float,
         max_state_age: float,
     ) -> None:
+        if duration_s <= 0 or rate_hz <= 0 or max_state_age <= 0:
+            raise ValueError("Pose duration, rate and freshness threshold must be positive")
+        if any(not np.isfinite(value).all() or len(value) != PART_DOF[key] for key,value in pose.items()):
+            raise ValueError("Invalid pose target")
         with self._lock:
+            self._target = None  # drain/disable policy stream before pose interpolation
             missing = sorted(set(pose) - set(self._parts))
             if missing:
                 raise RuntimeError(f"ready-pose states are missing: {missing}")
@@ -312,11 +342,11 @@ class AstribotS1Node(Node):
         steps = max(1, round(duration_s * rate_hz))
         deadline = time.monotonic()
         for index in range(steps):
-            stale = {
-                key: age
-                for key, age in self.input_ages().items()
-                if age > max_state_age
-            }
+            if not rclpy.ok():
+                raise RuntimeError("ROS shutdown during pose motion")
+            with self._lock:
+                stale = {key:time.monotonic()-self._part_times.get(key,0.) for key in pose
+                         if time.monotonic()-self._part_times.get(key,0.) > max_state_age}
             if stale:
                 raise RuntimeError(f"inputs became stale during ready pose: {stale}")
             alpha = 0.5 * (1.0 - np.cos(np.pi * (index + 1) / steps))
@@ -368,25 +398,15 @@ class AstribotS1Node(Node):
                 ):
                     self._last_grippers[gripper] = target
                     gripper_commands[gripper] = target
-        for arm, command in arm_commands.items():
-            self._publish_part(arm, command)
-        for gripper, command in gripper_commands.items():
-            self._publish_part(gripper, command)
+            for arm, command in arm_commands.items():
+                self._publish_part(arm, command)
+            for gripper, command in gripper_commands.items():
+                self._publish_part(gripper, command)
 
     def publish_hold(self) -> None:
+        """Stop advancing targets; hold the last command for every moved body part."""
         with self._lock:
-            if not self._smooth_arms:
-                return
-            held = {
-                "left_arm": self._smooth_arms["left_arm"].copy(),
-                "right_arm": self._smooth_arms["right_arm"].copy(),
-                "left_gripper": self._last_grippers.get(
-                    "left_gripper", self._parts["left_gripper"]
-                ).copy(),
-                "right_gripper": self._last_grippers.get(
-                    "right_gripper", self._parts["right_gripper"]
-                ).copy(),
-            }
-            self._target = held
-        for part, command in held.items():
-            self._publish_part(part, command)
+            self._target = None
+            held = {part:value.copy() for part,value in self._last_commands.items()}
+            for part, value in held.items():
+                self._publish_part(part,value)

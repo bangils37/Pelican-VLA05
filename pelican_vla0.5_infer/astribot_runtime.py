@@ -25,6 +25,20 @@ PART_DOF = {
     "head": 2,
 }
 
+# Same calibrated HOME target as the Astribot Diffusion Policy runtime.
+S1_HOME_POSE = {
+    "torso": np.asarray([0.28698922, -0.58628635, 0.29730871, -0.00562478]),
+    "left_arm": np.asarray([0.15609237, -0.02107994, -1.42101810, 1.65760320, -0.34594139, 0.11592893, 0.12616208]),
+    "right_arm": np.asarray([-0.16180375, -0.02177351, 1.41792764, 1.65719897, 0.34370263, 0.11559321, -0.12362211]),
+    "left_gripper": np.asarray([0.0]), "right_gripper": np.asarray([0.0]),
+    "head": np.asarray([0.00077752, 0.03296819]),
+}
+
+
+def should_return_home(*, execute, commands_started, outcome, enabled, ros_ok):
+    return execute and commands_started and enabled and ros_ok and outcome == "completed"
+
+
 S1_VMO_READY_POSE = {
     "torso": np.asarray([0.59620858, -1.19085960, 0.59082105, -0.00832367]),
     "left_arm": np.asarray(

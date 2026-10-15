@@ -8,4 +8,5 @@ import sys
 
 INFER_DIR = Path(__file__).resolve().parent / "pelican_vla0.5_infer"
 sys.path.insert(0, str(INFER_DIR))
-runpy.run_path(str(INFER_DIR / "infer_astribot.py"), run_name="__main__")
+if __name__ == "__main__":
+    runpy.run_path(str(INFER_DIR / "infer_astribot.py"), run_name="__main__")

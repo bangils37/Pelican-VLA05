@@ -11,6 +11,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import select
+import sys
+import subprocess
+import traceback
 import threading
 import time
 from pathlib import Path
@@ -21,6 +25,8 @@ import yaml
 
 from astribot_runtime import (
     S1_VMO_READY_POSE,
+    S1_HOME_POSE,
+    should_return_home,
     AstribotActionLimiter,
     TrackingCriticalGuard,
     tracking_diagnostics,
@@ -75,6 +81,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-joint-limits", action="store_true")
     parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--no-return-home", action="store_true", help="Disable HOME after graceful completion")
+    parser.add_argument("--home-duration", type=float, default=4.0)
+    parser.add_argument("--max-duration", type=float, default=None, help="Graceful stop after N seconds of policy loop")
+    parser.add_argument("--record-dir", default=str(Path.home()/"Desktop/pelican_astribot_logs/sessions"))
+    parser.add_argument("--no-record", action="store_true", help="Disable videos; trace logging stays enabled")
+    parser.add_argument("--record-fps", type=float, default=30.)
     return parser.parse_args()
 
 
@@ -101,6 +113,8 @@ def _load_stats(path: Path) -> tuple[dict, dict]:
 
 def _validate_args(args: argparse.Namespace) -> None:
     positive = {
+        "home-duration": args.home_duration,
+        "record-fps": args.record_fps,
         "frequency": args.frequency,
         "ready-timeout": args.ready_timeout,
         "max-sensor-age": args.max_sensor_age,
@@ -113,6 +127,8 @@ def _validate_args(args: argparse.Namespace) -> None:
     invalid = [key for key, value in positive.items() if value <= 0]
     if invalid:
         raise ValueError(f"options must be positive: {invalid}")
+    if args.max_duration is not None and args.max_duration <= 0:
+        raise ValueError("--max-duration must be positive")
     if args.execute_steps < 1:
         raise ValueError("--execute-steps must be >= 1")
     if args.inference_steps is not None and args.inference_steps < 1:
@@ -222,145 +238,227 @@ def main() -> None:
             ) from error
         raise
 
-    rclpy.init()
-    node = AstribotS1Node(
-        ros_config=ros_config,
-        camera_shapes=camera_shapes,
-        history_depth=history_depth,
-        state_sample_hz=args.frequency,
-    )
-    executor = MultiThreadedExecutor(num_threads=4)
-    executor.add_node(node)
-    spin_thread = threading.Thread(target=executor.spin, name="astribot-ros2", daemon=True)
-    spin_thread.start()
-    limiter = AstribotActionLimiter(
-        max_joint_delta=args.max_joint_delta,
-        max_gripper_delta=args.max_gripper_delta,
-        enforce_joint_limits=not args.disable_joint_limits,
-    )
-    guard = TrackingCriticalGuard(args.tracking_critical_limit)
-    commands_started = False
-    previous_command = None
-
-    def infer_once() -> tuple[np.ndarray, float]:
-        _assert_fresh(node, args.max_sensor_age)
-        images, states = node.snapshot()
-        if not states:
-            raise RuntimeError("state history is empty")
-        if engine.device.type == "cuda":
-            torch.cuda.synchronize(engine.device)
-        start = time.monotonic()
-        actions = engine.infer({}, states[-1], args.task, image_history=images)
-        if engine.device.type == "cuda":
-            torch.cuda.synchronize(engine.device)
-        elapsed = time.monotonic() - start
-        if actions.ndim != 2 or actions.shape[1] != 16 or not np.isfinite(actions).all():
-            raise RuntimeError(f"model returned invalid action chunk: shape={actions.shape}")
-        return actions, elapsed
-
+    from session_recorder import SessionRecorder, ConsoleCapture
+    import transformers
+    revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE,
+        capture_output=True,text=True).stdout.strip()
+    recorder = SessionRecorder(args.record_dir,dict(args=vars(args),git_revision=revision,
+        model_path=str(model_path),camera_map=camera_map,ros_config=ros_config,
+        model_config=json.loads((model_path/"config.json").read_text()),
+        state_stats=state_stats,action_stats=action_stats,image_delta_indices=engine.image_delta_indices,
+        torch_version=torch.__version__,transformers_version=transformers.__version__,
+        dtype=str(engine.dtype),device=str(engine.device),
+        checkpoint_files={p.name:dict(size=p.stat().st_size,mtime_ns=p.stat().st_mtime_ns)
+            for p in model_path.iterdir() if p.is_file()},
+        qwen3_vl_path=args.qwen3_vl_path or os.environ.get("QWEN3_VL_PATH"),
+        cosmos_tokenizer_path=os.environ.get("COSMOS_TOKENIZER_PATH")),
+        fps=args.record_fps,video=not args.no_record)
+    print(f"Recording session: {recorder.path}",flush=True)
+    original_stdout,original_stderr=sys.stdout,sys.stderr
+    sys.stdout,sys.stderr=ConsoleCapture(sys.stdout,recorder),ConsoleCapture(sys.stderr,recorder)
     try:
-        _wait_ready(node, args.ready_timeout)
-        mode = "EXECUTE" if args.execute else "DRY-RUN"
-        print(
-            f"Ready: mode={mode}, task={args.task!r}, cameras={list(camera_map)}, "
-            f"temporal_offsets={engine.image_delta_indices}, execute_steps={args.execute_steps}, "
-            f"inference_steps={engine.policy.config.num_inference_steps}",
-            flush=True,
+        rclpy.init()
+        node = AstribotS1Node(
+            ros_config=ros_config,
+            camera_shapes=camera_shapes,
+            history_depth=history_depth,
+            state_sample_hz=args.frequency,
         )
-        if not args.execute:
-            print("No robot commands will be published. Add --execute after dry-run validation.")
-        elif not args.yes:
-            answer = input("Enter 's' to start publishing Astribot commands: ").strip().lower()
-            if answer != "s":
-                print("Aborted before publishing commands.")
-                return
-        if args.prepare_ready_pose:
-            commands_started = True
-            node.move_to_pose(
-                S1_VMO_READY_POSE,
-                duration_s=args.ready_pose_duration,
-                rate_hz=args.ready_pose_rate,
-                max_state_age=args.max_sensor_age,
-            )
-            node.clear_observation_history()
-            _wait_ready(node, args.ready_timeout)
-            print("Astribot reached the VMO ready pose; fresh history started.", flush=True)
-        if not args.no_warmup:
-            _, latency = infer_once()
-            print(f"Warm-up inference discarded ({latency:.3f}s)", flush=True)
+        node.recorder = recorder
+        executor = MultiThreadedExecutor(num_threads=4)
+        executor.add_node(node)
+        spin_thread = threading.Thread(target=executor.spin, name="astribot-ros2", daemon=True)
+        spin_thread.start()
+        limiter = AstribotActionLimiter(
+            max_joint_delta=args.max_joint_delta,
+            max_gripper_delta=args.max_gripper_delta,
+            enforce_joint_limits=not args.disable_joint_limits,
+        )
+        guard = TrackingCriticalGuard(args.tracking_critical_limit)
+        commands_started = False
+        previous_command = None
+        outcome = "aborted"
+        cycle = -1
+        graceful_stop = threading.Event()
+        keyboard_stop = threading.Event()
+        keyboard_thread = None
 
-        cycle = 0
-        dt = 1.0 / args.frequency
-        while rclpy.ok():
-            actions, latency = infer_once()
+        def infer_once() -> tuple[np.ndarray, float]:
             _assert_fresh(node, args.max_sensor_age)
-            reference = node.latest_state()
-            first = unpack_vector(actions[0])
-            arm_jump = max(
-                np.max(np.abs(first["left_arm"] - unpack_vector(reference)["left_arm"])),
-                np.max(np.abs(first["right_arm"] - unpack_vector(reference)["right_arm"])),
-            )
+            recorder.check()
+            images, states, stamps, full_state = node.trace_snapshot()
+            cpu_rng = torch.random.get_rng_state().numpy().copy()
+            cuda_rng = torch.cuda.get_rng_state(engine.device).cpu().numpy().copy() if engine.device.type == "cuda" else np.array([],dtype=np.uint8)
+            if not states:
+                raise RuntimeError("state history is empty")
+            if engine.device.type == "cuda":
+                torch.cuda.synchronize(engine.device)
+            start = time.monotonic()
+            actions = engine.infer({}, states[-1], args.task, image_history=images)
+            if engine.device.type == "cuda":
+                torch.cuda.synchronize(engine.device)
+            elapsed = time.monotonic() - start
+            if actions.ndim != 2 or actions.shape[1] != 16 or not np.isfinite(actions).all():
+                raise RuntimeError(f"model returned invalid action chunk: shape={actions.shape}")
+            arrays = {"state":states[-1],"states":states,"actions":actions,
+                      "rng_cpu":cpu_rng,"rng_cuda":cuda_rng,
+                      **{f"history_{cam}":history for cam,history in images.items()}}
+            recorder.trace(f"cycle_{cycle:06d}",arrays,dict(cycle=cycle,phase=recorder.phase,
+                started_monotonic=start,latency=elapsed,history_timestamps=stamps,
+                full_robot_state=full_state,input_ages=node.input_ages(),task=args.task))
+            return actions, elapsed
+
+        try:
+            _wait_ready(node, args.ready_timeout)
+            mode = "EXECUTE" if args.execute else "DRY-RUN"
             print(
-                f"cycle={cycle:04d} inference={latency:.3f}s raw_arm_jump={arm_jump:.3f}rad "
-                f"grippers=[{first['left_gripper'][0]:.1f}, {first['right_gripper'][0]:.1f}]",
+                f"Ready: mode={mode}, task={args.task!r}, cameras={list(camera_map)}, "
+                f"temporal_offsets={engine.image_delta_indices}, execute_steps={args.execute_steps}, "
+                f"inference_steps={engine.policy.config.num_inference_steps}",
                 flush=True,
             )
-            if latency > args.max_inference_latency:
-                message = (
-                    f"inference latency {latency:.3f}s exceeds safety limit "
-                    f"{args.max_inference_latency:.3f}s"
+            if not args.execute:
+                print("No robot commands will be published. Add --execute after dry-run validation.")
+            elif not args.yes:
+                answer = input("Enter 's' to start publishing Astribot commands: ").strip().lower()
+                if answer != "s":
+                    print("Aborted before publishing commands.")
+                    return
+            print(f"Return HOME on graceful completion: {args.execute and not args.no_return_home}")
+            if sys.stdin.isatty():
+                print("Press Enter for graceful completion; Ctrl-C stops with HOLD.",flush=True)
+                def wait_for_finish():
+                    while not keyboard_stop.is_set():
+                        readable,_,_ = select.select([sys.stdin],[],[],.2)
+                        if readable:
+                            if sys.stdin.readline(): graceful_stop.set()
+                            return
+                keyboard_thread=threading.Thread(target=wait_for_finish,daemon=True)
+                keyboard_thread.start()
+            if args.prepare_ready_pose:
+                recorder.phase = "READY_POSE"
+                commands_started = True
+                node.move_to_pose(
+                    S1_VMO_READY_POSE,
+                    duration_s=args.ready_pose_duration,
+                    rate_hz=args.ready_pose_rate,
+                    max_state_age=args.max_sensor_age,
                 )
-                if args.execute:
-                    raise RuntimeError(f"{message}; refusing to publish stale actions")
-                print(f"WARNING: {message}", flush=True)
-            if args.execute:
-                deadline = time.monotonic()
-                for raw_action in actions[: args.execute_steps]:
-                    _assert_fresh(node, args.max_sensor_age)
-                    measured = node.latest_state()
-                    if previous_command is None:
-                        previous_command = measured.copy()
-                    diagnostics = tracking_diagnostics(
-                        previous_command,
-                        measured,
-                        args.tracking_warn_threshold,
-                        args.tracking_critical_threshold,
+                node.clear_observation_history()
+                _wait_ready(node, args.ready_timeout)
+                print("Astribot reached the VMO ready pose; fresh history started.", flush=True)
+            if not args.no_warmup:
+                recorder.phase = "WARMUP"
+                _, latency = infer_once()
+                print(f"Warm-up inference discarded ({latency:.3f}s)", flush=True)
+
+            cycle = 0
+            dt = 1.0 / args.frequency
+            loop_started=time.monotonic()
+            outcome="running"
+            while rclpy.ok():
+                if graceful_stop.is_set() or (args.max_duration is not None and time.monotonic()-loop_started>=args.max_duration):
+                    outcome="completed"
+                    break
+                recorder.phase = f"CYCLE_{cycle:06d}"
+                actions, latency = infer_once()
+                _assert_fresh(node, args.max_sensor_age)
+                reference = node.latest_state()
+                first = unpack_vector(actions[0])
+                arm_jump = max(
+                    np.max(np.abs(first["left_arm"] - unpack_vector(reference)["left_arm"])),
+                    np.max(np.abs(first["right_arm"] - unpack_vector(reference)["right_arm"])),
+                )
+                print(
+                    f"cycle={cycle:04d} inference={latency:.3f}s raw_arm_jump={arm_jump:.3f}rad "
+                    f"grippers=[{first['left_gripper'][0]:.1f}, {first['right_gripper'][0]:.1f}]",
+                    flush=True,
+                )
+                if latency > args.max_inference_latency:
+                    message = (
+                        f"inference latency {latency:.3f}s exceeds safety limit "
+                        f"{args.max_inference_latency:.3f}s"
                     )
-                    if diagnostics.severity != "ok":
-                        print(
-                            f"{diagnostics.severity.upper()} tracking: max={diagnostics.maximum:.3f}rad "
-                            f"rms={diagnostics.rms:.3f} joint={diagnostics.worst_joint}",
-                            flush=True,
+                    if args.execute:
+                        raise RuntimeError(f"{message}; refusing to publish stale actions")
+                    print(f"WARNING: {message}", flush=True)
+                if args.execute:
+                    deadline = time.monotonic()
+                    for action_index, raw_action in enumerate(actions[: args.execute_steps]):
+                        if graceful_stop.is_set(): break
+                        _assert_fresh(node, args.max_sensor_age)
+                        measured = node.latest_state()
+                        if previous_command is None:
+                            previous_command = measured.copy()
+                        diagnostics = tracking_diagnostics(
+                            previous_command,
+                            measured,
+                            args.tracking_warn_threshold,
+                            args.tracking_critical_threshold,
                         )
-                    if guard.observe(diagnostics.severity):
-                        raise RuntimeError(
-                            f"automatic stop after {guard.consecutive} consecutive critical tracking samples"
-                        )
-                    command = limiter.limit(raw_action, reference)
-                    node.set_action_target(command)
-                    commands_started = True
-                    previous_command = command.copy()
-                    reference = command
-                    deadline += dt
-                    time.sleep(max(0.0, deadline - time.monotonic()))
-            else:
-                time.sleep(args.execute_steps * dt)
-            cycle += 1
-            if args.max_cycles is not None and cycle >= args.max_cycles:
-                break
-    except KeyboardInterrupt:
-        print("Interrupted; stopping inference.", flush=True)
-    finally:
-        if commands_started:
-            try:
+                        if diagnostics.severity != "ok":
+                            print(
+                                f"{diagnostics.severity.upper()} tracking: max={diagnostics.maximum:.3f}rad "
+                                f"rms={diagnostics.rms:.3f} joint={diagnostics.worst_joint}",
+                                flush=True,
+                            )
+                        if guard.observe(diagnostics.severity):
+                            raise RuntimeError(
+                                f"automatic stop after {guard.consecutive} consecutive critical tracking samples"
+                            )
+                        command = limiter.limit(raw_action, reference)
+                        recorder.event("policy_command",cycle=cycle,action_index=action_index,
+                            raw_action=raw_action,limited_command=command,measured_state=measured,
+                            tracking=dict(severity=diagnostics.severity,maximum=diagnostics.maximum,
+                                          rms=diagnostics.rms,worst_joint=diagnostics.worst_joint))
+                        node.set_action_target(command)
+                        commands_started = True
+                        previous_command = command.copy()
+                        reference = command
+                        deadline += dt
+                        time.sleep(max(0.0, deadline - time.monotonic()))
+                else:
+                    time.sleep(args.execute_steps * dt)
+                cycle += 1
+                if args.max_cycles is not None and cycle >= args.max_cycles:
+                    outcome="completed"
+                    break
+            if outcome == "running": outcome="ros_shutdown"
+            if should_return_home(execute=args.execute,commands_started=commands_started,
+                    outcome=outcome,enabled=not args.no_return_home,ros_ok=rclpy.ok()):
+                recorder.phase="RETURN_HOME"
                 node.publish_hold()
-            except Exception as error:
-                print(f"Warning: could not publish final hold command: {error}", flush=True)
-        executor.shutdown(timeout_sec=2.0)
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-        spin_thread.join(timeout=2.0)
+                node.move_to_pose(S1_HOME_POSE,args.home_duration,args.ready_pose_rate,args.max_sensor_age)
+                recorder.event("home_target_published")
+        except KeyboardInterrupt:
+            outcome="interrupted"
+            recorder.event("interrupted")
+            print("Interrupted; stopping inference.", flush=True)
+        except Exception:
+            outcome="error"
+            recorder.event("exception",traceback=traceback.format_exc())
+            raise
+        finally:
+            recorder.phase="STOPPING"
+            keyboard_stop.set()
+            if keyboard_thread: keyboard_thread.join(.5)
+            if commands_started:
+                try:
+                    node.publish_hold()
+                except Exception as error:
+                    print(f"Warning: could not publish final hold command: {error}", flush=True)
+            executor.shutdown(timeout_sec=2.0)
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
+            spin_thread.join(timeout=2.0)
+            node.recorder=None
+            sys.stdout,sys.stderr=original_stdout,original_stderr
+            recorder.close(outcome)
+    finally:
+        sys.stdout,sys.stderr=original_stdout,original_stderr
+        if not recorder.closed:
+            recorder.close("startup_or_cleanup_error")
 
 
 if __name__ == "__main__":

@@ -157,3 +157,82 @@ This license covers the source code in this repository. A checkpoint is a
 separate distribution and must carry its own license and model card. Qwen3-VL
 weights are Apache-2.0; NVIDIA Cosmos tokenizer weights use the NVIDIA Open
 Model License.
+
+## Session recording, HOME and offline explanations
+
+Astribot inference automatically starts a uniquely named session under
+`~/Desktop/pelican_astribot_logs/sessions/`. Override with `--record-dir`.
+Recording begins after checkpoint loading, before waiting for live observations.
+No robot command is published unless `--execute` is supplied.
+
+Every session contains:
+
+- `session.json`: configuration, git revision, checkpoint file sizes/mtimes,
+  normalization stats, camera layout, tokenizer paths, library versions,
+  outcome, writer errors and accepted/dropped record counts.
+- `console.log`, `events.jsonl`: runtime console output, full-body measured joint
+  positions with source stamps, raw/limited policy commands and tracking
+  diagnostics, and actual published commands (including 250 Hz arm streaming,
+  READY/HOME and hold). Monotonic timestamps align these records.
+- `videos/<camera>.mp4`: inference-resolution camera videos, default 30 FPS.
+  `video_frame` events map encoded frame indices to actual sampling times;
+  video timing is nominal FPS and is not authoritative when frames drop.
+- `cycles/cycle_XXXXXX.npz` + `.json`: lossless RGB history supplied to each
+  inference, state history/current state, raw absolute action chunk, CPU/CUDA
+  RNG states, task, input arrival/source timestamps, full-body state snapshot
+  and inference latency. Cycle `-1` is warm-up and is not executed.
+
+The writer uses a **separate CPU process**, with bounded independent queues for
+trace, events and video. Inference never waits for disk/video encoding. This
+cannot guarantee zero overhead or lossless recording under arbitrary disk/CPU
+load: queue/RNG bookkeeping still costs time. Overload drops records and reports
+counts; `complete=false` explicitly marks incomplete sessions. A writer failure
+raises at the next cycle and follows the existing hold/cleanup path. Flushing
+happens after stopping commands, with a bounded timeout. Process kill/power loss
+can leave incomplete files. `--no-record` disables videos only, not trace logging.
+Repeated histories are stored uncompressed for fidelity and low encoding cost;
+plan disk capacity accordingly. Do not mutate checkpoints during recording or
+before replay (weights themselves are not copied into each session).
+
+### HOME behavior
+
+- `--execute` sessions return to HOME by default after `--max-cycles`,
+  `--max-duration SECONDS`, or Enter in an interactive terminal.
+- `--no-return-home` disables this behavior. `--home-duration` defaults to 4 s.
+- Ctrl-C, exceptions, stale sensors and tracking aborts **hold** instead of
+  initiating HOME motion. ROS shutdown also skips HOME. HOME freshness checks
+  cover every moved body part, including head and torso.
+- The HOME target closes both grippers, matching the existing DP HOME pose.
+  Choose `--no-return-home` for tasks whose final object placement/gripper state
+  must be preserved. HOME publishes an interpolated target; this is not a
+  measured convergence guarantee.
+
+Standalone HOME/READY (no checkpoint or cameras needed):
+
+```bash
+scripts/move_astribot_home.sh --pose home                 # diagnostics only
+scripts/move_astribot_home.sh --pose home --execute       # confirms before moving
+scripts/move_astribot_home.sh --pose ready --execute
+```
+
+### Explain the actual recorded input
+
+Run offline in a Pelican environment, from the repository root:
+
+```bash
+python scripts/explain_session.py /path/to/session --cycle 0 --method rollout
+python scripts/explain_session.py /path/to/session --cycle 0 \
+  --method gradient_rollout --action-step 0 --action-dim 14
+```
+
+The tool reconstructs the inference batch using the recorded real history and
+RNG state, checks replay actions against the saved chunk, and refuses to produce
+an explanation if replay differs beyond tolerance. It saves PNG overlays, raw
+heat/token maps and replay error under `session/explanations/`. It checks
+checkpoint size/mtime identity, not cryptographic identity; keep the same model,
+processor assets and software environment. CUDA recordings require CUDA replay.
+Attention capture/backprop never runs inside the robot control loop.
+
+The decoder attention maps still cover the Qwen image-token path, not full
+Cosmos/vision-tower attribution. `gradient_rollout` remains a conditional
+final-Euler-step method; full Chefer/LRP is not implemented.

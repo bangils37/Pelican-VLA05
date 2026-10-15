@@ -199,24 +199,15 @@ class PelicanVLA05Inference:
         return x * self._safe_std(std) + mean
 
     @torch.no_grad()
-    def infer(
+    def prepare_batch(
         self,
         images: Mapping[str, np.ndarray],
         state: Sequence[float],
         task: str,
         *,
         image_history: Mapping[str, Sequence[np.ndarray]] | None = None,
-    ) -> np.ndarray:
-        """Predict an action chunk for one timestep.
-
-        Args:
-            images: mapping of host camera name -> HxWxC RGB image.
-            state: current proprioceptive state (raw units).
-            task: natural-language instruction.
-
-        Returns:
-            ``(chunk_size, action_dim)`` array of absolute action targets.
-        """
+    ) -> dict:
+        """Build the exact inference batch, retaining real temporal history."""
         if image_history is not None:
             self.set_image_history(image_history)
         else:
@@ -251,6 +242,29 @@ class PelicanVLA05Inference:
             else:
                 batch[k] = v
 
+        return batch
+
+    @torch.no_grad()
+    def infer(
+        self,
+        images: Mapping[str, np.ndarray],
+        state: Sequence[float],
+        task: str,
+        *,
+        image_history: Mapping[str, Sequence[np.ndarray]] | None = None,
+    ) -> np.ndarray:
+        """Predict an action chunk for one timestep.
+
+        Args:
+            images: mapping of host camera name -> HxWxC RGB image.
+            state: current proprioceptive state (raw units).
+            task: natural-language instruction.
+
+        Returns:
+            ``(chunk_size, action_dim)`` array of absolute action targets.
+        """
+        state_raw = np.asarray(state, dtype=np.float32)
+        batch = self.prepare_batch(images,state,task,image_history=image_history)
         autocast = (
             torch.autocast(device_type="cuda", dtype=self.dtype)
             if self.device.type == "cuda"

@@ -4,7 +4,7 @@ from attnvis.core.attribution import cached_rollout
 from attnvis.core.types import AttnResult
 
 
-def explain(adapter, frame, method, action_step=0, action_dim=0, seed=0, target_sign=1):
+def explain(adapter, frame, method, action_step=0, action_dim=0, seed=0, target_sign=1, batch_override=None):
     import torch
     from scipy.ndimage import zoom
     from .gradient_capture import capture_final_step
@@ -16,16 +16,17 @@ def explain(adapter, frame, method, action_step=0, action_dim=0, seed=0, target_
         raise ValueError("target_sign must be -1 or 1")
     if not 0 <= action_step < adapter.config.chunk_size:
         raise ValueError("action_step outside checkpoint chunk")
-    batch = adapter._build_batch(frame)
+    batch = adapter._build_batch(frame) if batch_override is None else batch_override
     device = torch.device(adapter._device)
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     metadata = dict(method=method, seed=seed, action_step=action_step,
         attribution_scope="language_decoder_image_tokens",
-        temporal_input="repeated_single_frame", checkpoint=adapter.ckpt)
+        temporal_input="repeated_single_frame" if batch_override is None else "recorded_history", checkpoint=adapter.ckpt)
     with torch.random.fork_rng(devices=devices):
-        torch.random.default_generator.manual_seed(seed)
-        for d in devices:
-            torch.cuda.default_generators[d].manual_seed(seed)
+        if seed is not None:
+            torch.random.default_generator.manual_seed(seed)
+            for d in devices:
+                torch.cuda.default_generators[d].manual_seed(seed)
         if method == "gradient_rollout":
             calls, target = capture_final_step(adapter,batch,action_step,action_dim,target_sign)
             metadata.update(target)
