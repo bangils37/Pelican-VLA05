@@ -34,6 +34,14 @@ class RolloutTests(unittest.TestCase):
         g=np.array([[[[-1.,2.]],[[3.,-4.]]]])
         np.testing.assert_array_equal(chefer_weights(r,g),[[[6.,3.]]])
 
+    def test_flat_astribot_stats(self):
+        from attnvis.adapters.pelicanvla import _resolve_state_stats
+        for key in ("state", "observation.state"):
+            mean,std,dim,label=_resolve_state_stats({key:{"mean":[1.,2.],"std":[3.,4.]}})
+            self.assertEqual(dim,2)
+            self.assertEqual(label,key)
+            np.testing.assert_array_equal(mean,[1.,2.])
+
     def test_reject_invalid(self):
         with self.assertRaises(ValueError):
             cached_rollout(np.zeros((1,2,3)),np.zeros((1,1,3)),np.zeros((1,1,4)),[0])

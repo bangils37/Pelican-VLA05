@@ -101,6 +101,10 @@ def _resolve_state_stats(stats: dict, embodiment: str | None = None):
         std = np.asarray(src["std"], dtype=np.float32)
         return mean, std, int(mean.shape[0]), label
 
+    # Fine-tuned Astribot checkpoints use flat state/action statistics.
+    for key in ("state", "observation.state"):
+        if key in stats and "mean" in stats[key] and "std" in stats[key]:
+            return _from_obs_state(stats[key], key)
     if embodiment and embodiment in stats and "observation.state" in stats[embodiment]:
         return _from_obs_state(stats[embodiment]["observation.state"],
                                f"{embodiment}/observation.state")
