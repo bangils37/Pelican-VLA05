@@ -87,3 +87,7 @@ class FrankaFr3Source(_RoboMINDSource):
 
 class FrankaSingleSource(_RoboMINDSource):
     name = "franka_single"
+
+
+class AstribotSource(_RoboMINDSource):
+    name = "astribot_s1"

@@ -178,6 +178,11 @@ FRANKA_FR3_TASKS = {
 }
 
 _FR_SINGLE = f"{_V3}/franka/franka_emika_singleArm-gripper-4cameras_2"
+_ASTRIBOT_COFFEE = str(DATA_ROOTS.get("astribot_coffee", ""))
+ASTRIBOT_S1_TASKS = {
+    "coffee": _ASTRIBOT_COFFEE,
+}
+
 FRANKA_SINGLE_TASKS = {
     "cup_on_holder": f"{_FR_SINGLE}/cup_goes_on_the_cup_holder/success/lerobot_RoboMIND",
 }
@@ -185,6 +190,17 @@ FRANKA_SINGLE_TASKS = {
 
 # ── Embodiment registry ──────────────────────────────────────────────────────
 EMBODIMENTS: dict[str, Embodiment] = {
+    "astribot_s1": Embodiment(
+        name="astribot_s1", arm="dual", state_dim=16, loader="lerobot",
+        cameras=[
+            Camera("cam_head",        "observation.images.cam_head",        "third_person"),
+            Camera("cam_left_wrist",  "observation.images.cam_left_wrist",  "wrist"),
+            Camera("cam_right_wrist", "observation.images.cam_right_wrist", "wrist"),
+        ],
+        state_cols=[("observation.state", 16)],
+        tasks=ASTRIBOT_S1_TASKS,
+        default_suite="coffee",
+    ),
     # LIBERO — single arm 8D, 2 cameras (hdf5)
     "libero": Embodiment(
         name="libero", arm="single", state_dim=8, loader="hdf5_libero",

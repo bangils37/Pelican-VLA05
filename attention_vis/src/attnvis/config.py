@@ -18,13 +18,14 @@ def _p(env_key: str, default: str) -> Path:
 
 
 DATA_ROOTS = {
-    "libero":      _p("ATTNVIS_LIBERO_ROOT",      ""),
-    "robotwin":    _p("ATTNVIS_ROBOTWIN_ROOT",    ""),
+    "libero":          _p("ATTNVIS_LIBERO_ROOT",          ""),
+    "robotwin":        _p("ATTNVIS_ROBOTWIN_ROOT",        ""),
     # LeRobot 3.0 dataset roots — one per collection layout on disk.
     # See README §④ for the on-disk schema they must follow.
-    "unify":       _p("ATTNVIS_UNIFY_ROOT",       ""),  # tienkung / ur5e etc.
-    "lerobot_v3":  _p("ATTNVIS_LEROBOT_V3_ROOT",  ""),  # ur5e_v3 / ur5e_dual / franka_fr3
-    "vla_lerobot": _p("ATTNVIS_VLA_LEROBOT_ROOT", ""),  # agilex_jd / realsource_world_v30
+    "unify":           _p("ATTNVIS_UNIFY_ROOT",           ""),  # tienkung / ur5e etc.
+    "lerobot_v3":      _p("ATTNVIS_LEROBOT_V3_ROOT",      ""),  # ur5e_v3 / ur5e_dual / franka_fr3
+    "vla_lerobot":     _p("ATTNVIS_VLA_LEROBOT_ROOT",     ""),  # agilex_jd / realsource_world_v30
+    "astribot_coffee": _p("ATTNVIS_ASTRIBOT_COFFEE_ROOT", "/home/aitt/data/serving_brewed_coffee_clean_374_episodes"),
 }
 
 WEIGHTS = {

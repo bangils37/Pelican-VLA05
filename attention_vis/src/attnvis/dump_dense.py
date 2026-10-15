@@ -36,6 +36,7 @@ from attnvis.paths import DENSE as OUT
 
 
 _LEROBOT_SOURCES = {
+    "astribot_s1":    "AstribotSource",
     "tienkung":       "TienkungSource",
     "ur5e":           "Ur5eSource",
     "ur5e_v3":        "Ur5eV3Source",
