@@ -17,7 +17,7 @@ def method(name):
     fn=next(x for x in cls.body if isinstance(x,ast.FunctionDef) and x.name==name)
     code=ast.fix_missing_locations(ast.Module(body=[fn],type_ignores=[]))
     scope=dict(np=np,time=time,PART_DOF=PART_DOF,PART_KEYS=PART_KEYS,pack_vector=pack_vector,
-        rclpy=SimpleNamespace(ok=lambda:True),Mapping=dict,Sequence=list)
+        rclpy=SimpleNamespace(ok=lambda:True),Mapping=dict,Sequence=list,RobotJointState=object)
     exec(compile(code,'astribot_ros2.py','exec'),scope)
     return scope[name]
 
