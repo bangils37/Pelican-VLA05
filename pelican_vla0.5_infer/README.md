@@ -177,7 +177,7 @@ Every session contains:
 - `videos/<camera>.mp4`: inference-resolution camera videos, default 30 FPS.
   `video_frame` events map encoded frame indices to actual sampling times;
   video timing is nominal FPS and is not authoritative when frames drop.
-- `cycles/cycle_XXXXXX.npz` + `.json`: lossless RGB history supplied to each
+- `cycles/cycle_XXXXXX.npz` + `.json`: lossless RGB frames selected from history for each
   inference, state history/current state, raw absolute action chunk, CPU/CUDA
   RNG states, task, input arrival/source timestamps, full-body state snapshot
   and inference latency. Cycle `-1` is warm-up and is not executed.
@@ -190,8 +190,10 @@ counts; `complete=false` explicitly marks incomplete sessions. A writer failure
 raises at the next cycle and follows the existing hold/cleanup path. Flushing
 happens after stopping commands, with a bounded timeout. Process kill/power loss
 can leave incomplete files. `--no-record` disables videos only, not trace logging.
-Repeated histories are stored uncompressed for fidelity and low encoding cost;
-plan disk capacity accordingly. Do not mutate checkpoints during recording or
+Selected history frames are deduplicated within a cycle and stored uncompressed;
+unused intermediate camera frames are in video, not the lossless cycle archive.
+Index/length fields preserve the temporal selection exactly.
+Plan disk capacity accordingly. Do not mutate checkpoints during recording or
 before replay (weights themselves are not copied into each session).
 
 ### HOME behavior

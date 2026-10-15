@@ -47,7 +47,8 @@ def main():
         engine.policy.model.config.num_inference_steps=steps
     z=np.load(a.session/'cycles'/f'{name}.npz',allow_pickle=False)
     cams=list(meta['camera_map'])
-    history={cam:z[f'history_{cam}'] for cam in cams}
+    from session_recorder import decode_history
+    history=decode_history(z,cams)
     def restore_rng():
         torch.random.set_rng_state(torch.from_numpy(z['rng_cpu'].copy()))
         if len(z['rng_cuda']):

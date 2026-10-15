@@ -238,7 +238,7 @@ def main() -> None:
             ) from error
         raise
 
-    from session_recorder import SessionRecorder, ConsoleCapture
+    from session_recorder import SessionRecorder, ConsoleCapture, encode_history
     import transformers
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE,
         capture_output=True,text=True).stdout.strip()
@@ -302,7 +302,7 @@ def main() -> None:
                 raise RuntimeError(f"model returned invalid action chunk: shape={actions.shape}")
             arrays = {"state":states[-1],"states":states,"actions":actions,
                       "rng_cpu":cpu_rng,"rng_cuda":cuda_rng,
-                      **{f"history_{cam}":history for cam,history in images.items()}}
+                      **encode_history(images,engine.image_delta_indices)}
             recorder.trace(f"cycle_{cycle:06d}",arrays,dict(cycle=cycle,phase=recorder.phase,
                 started_monotonic=start,latency=elapsed,history_timestamps=stamps,
                 full_robot_state=full_state,input_ages=node.input_ages(),task=args.task))

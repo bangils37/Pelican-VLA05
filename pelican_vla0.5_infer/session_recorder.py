@@ -219,3 +219,36 @@ class ConsoleCapture:
         return result
     def flush(self): self.stream.flush()
     def __getattr__(self,key): return getattr(self.stream,key)
+
+
+def encode_history(histories, offsets, capacity=32):
+    """Store every RGB frame actually selected by temporal offsets, without duplicates.
+
+    Unused intermediate frames are present in video, not in lossless trace.
+    Index/length fields reconstruct the exact selected inference tensors.
+    """
+    result = {}
+    for cam, history in histories.items():
+        history = list(history)[-capacity:]
+        last = len(history)-1
+        if last < 0: raise ValueError(f'Empty camera history: {cam}')
+        indices = sorted({max(0,min(last,last+offset)) for offset in offsets})
+        result[f'history_{cam}'] = [history[index] for index in indices]
+        result[f'history_indices_{cam}'] = np.asarray(indices,dtype=np.int64)
+        result[f'history_length_{cam}'] = np.asarray(len(history),dtype=np.int64)
+    return result
+
+
+def decode_history(archive, cameras):
+    result = {}
+    for cam in cameras:
+        frames = archive[f'history_{cam}']
+        if f'history_indices_{cam}' not in archive:  # schema-1 dense traces
+            result[cam] = frames
+            continue
+        length = int(archive[f'history_length_{cam}'])
+        indices = archive[f'history_indices_{cam}']
+        history = [frames[-1]]*length
+        for index,frame in zip(indices,frames): history[int(index)] = frame
+        result[cam] = history
+    return result

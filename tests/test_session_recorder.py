@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 import numpy as np
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'pelican_vla0.5_infer'))
-from session_recorder import SessionRecorder
+from session_recorder import SessionRecorder, encode_history, decode_history
 from astribot_runtime import should_return_home, S1_HOME_POSE
 
 
@@ -49,6 +49,18 @@ class RecorderTests(unittest.TestCase):
             with self.assertRaises(RuntimeError): rec.check()
             rec.close('error')
             self.assertFalse(json.loads((rec.path/'session.json').read_text())['complete'])
+
+    def test_sparse_history_preserves_selected_frames(self):
+        for length in (1,4,16,40):
+            for offsets in ([-15,0,15],[-3,-1,0]):
+                history={'cam':[np.full((2,2,3),i,dtype=np.uint8) for i in range(length)]}
+                encoded=encode_history(history,offsets)
+                restored=decode_history(encoded,['cam'])['cam']
+                expected=history['cam'][-32:]
+                for offset in offsets:
+                    index=max(0,min(len(expected)-1,len(expected)-1+offset))
+                    np.testing.assert_array_equal(restored[index],expected[index])
+                self.assertLessEqual(len(encoded['history_cam']),len(offsets))
 
     def test_home_only_on_graceful_execute(self):
         base=dict(execute=True,commands_started=True,outcome='completed',enabled=True,ros_ok=True)
