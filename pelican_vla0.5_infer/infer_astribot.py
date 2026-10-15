@@ -84,7 +84,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-return-home", action="store_true", help="Disable HOME after graceful completion")
     parser.add_argument("--home-duration", type=float, default=4.0)
     parser.add_argument("--max-duration", type=float, default=None, help="Graceful stop after N seconds of policy loop")
-    parser.add_argument("--record-dir", default=str(Path.home()/"Desktop/pelican_astribot_logs/sessions"))
+    _repo_root = Path(__file__).resolve().parent.parent
+    parser.add_argument("--record-dir", default=str(_repo_root / "logs" / "sessions"))
     parser.add_argument("--no-record", action="store_true", help="Disable videos; trace logging stays enabled")
     parser.add_argument("--record-fps", type=float, default=30.)
     return parser.parse_args()
