@@ -8,6 +8,8 @@ import json
 import multiprocessing as mp
 import os
 import queue
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -98,8 +100,21 @@ def _writer(directory, queues, stop, ready, status, fps, video):
         status.put(error)
         ready.set()
     finally:
-        for writer in videos.values():
+        for cam, writer in videos.items():
             writer.release()
+            video_file = root / "videos" / f"{cam}.mp4"
+            if video_file.exists() and shutil.which("ffmpeg"):
+                tmp_h264 = root / "videos" / f".{cam}_h264.mp4"
+                try:
+                    subprocess.run(
+                        ["ffmpeg", "-y", "-i", str(video_file), "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                         "-preset", "fast", "-crf", "22", "-loglevel", "error", str(tmp_h264)],
+                        check=True, timeout=60
+                    )
+                    tmp_h264.replace(video_file)
+                except Exception:
+                    if tmp_h264.exists():
+                        tmp_h264.unlink()
         if events:
             events.close()
         if console:
