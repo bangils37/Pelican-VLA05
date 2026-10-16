@@ -30,13 +30,7 @@ pretrained_model/
 *.npy
 
 # --- inference logs & session recordings ---
-# Ignore everything inside logs/ except the skeleton .gitkeep markers.
-logs/**
-!logs/sessions/
-!logs/sessions/.gitkeep
-!logs/astribot_legacy/
-!logs/astribot_legacy/.gitkeep
-!logs/.gitkeep
+logs/
 
 # --- media ---
 *.mp4
