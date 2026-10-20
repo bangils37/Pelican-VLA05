@@ -1,0 +1,20 @@
+{
+  "method": "rollout",
+  "seed": null,
+  "action_step": 0,
+  "attribution_scope": "language_decoder_image_tokens",
+  "temporal_input": "recorded_history",
+  "checkpoint": "/home/anhnb9/Documents/Pelican-VLA05/checkpoints/pelican_astri_coffee_full_ft/best_model",
+  "slots": 32,
+  "denoise_selection": "last",
+  "camera_order": [
+    "cam_head",
+    "cam_left_wrist",
+    "cam_right_wrist"
+  ],
+  "replay_max_absolute_error": 0.2334136962890625,
+  "replay_max_normalized_error": 0.012092659249901772,
+  "replay_normalized_tolerance": 0.03125,
+  "replay_bitwise_equal": false,
+  "source_cycle": 15
+}

@@ -21,6 +21,10 @@ def main():
     p.add_argument('--device',default='cuda:0')
     p.add_argument('--replay-atol',type=float,default=None,
         help='Maximum action error in training-standard-deviation units (default: four dtype eps, floor 1e-5)')
+    p.add_argument('--output-dir',type=Path,default=None,
+        help='Root directory for explanations (default: <repo>/explanations/<session_id> or <session>/explanations)')
+    p.add_argument('--model-path',type=Path,default=None,
+        help='Override model checkpoint path if moved since recording')
     a=p.parse_args()
     if a.replay_atol is not None and (not math.isfinite(a.replay_atol) or a.replay_atol < 0):
         p.error("--replay-atol must be finite and nonnegative")
@@ -28,7 +32,11 @@ def main():
     name=f'cycle_{a.cycle:06d}'
     cycle=json.loads((a.session/'cycles'/f'{name}.json').read_text())
     for key,env in [('qwen3_vl_path','QWEN3_VL_PATH'),('cosmos_tokenizer_path','COSMOS_TOKENIZER_PATH')]:
-        if meta.get(key): os.environ.setdefault(env,meta[key])
+        val = meta.get(key)
+        if val and Path(val).exists():
+            os.environ.setdefault(env,val)
+        elif env=='COSMOS_TOKENIZER_PATH' and (ROOT/'pretrained_model/cosmos_tokenizer').exists():
+            os.environ.setdefault(env,str(ROOT/'pretrained_model/cosmos_tokenizer'))
     os.environ.setdefault('HF_HUB_OFFLINE','1')
     import numpy as np
     import torch
@@ -38,7 +46,13 @@ def main():
     from PIL import Image
     from attnvis.figlib import blend
     # Fail rather than silently replay with replaced checkpoint files.
-    model_path=Path(meta['model_path'])
+    model_path=Path(a.model_path) if a.model_path else Path(meta['model_path'])
+    if not model_path.exists():
+        cand = ROOT / meta.get('args', {}).get('model_path', '')
+        if cand.exists():
+            model_path = cand
+        elif (ROOT / 'checkpoints/pelican_astri_coffee_full_ft/best_model').exists():
+            model_path = ROOT / 'checkpoints/pelican_astri_coffee_full_ft/best_model'
     for file,info in meta['checkpoint_files'].items():
         stat=(model_path/file).stat()
         if stat.st_size!=info['size'] or stat.st_mtime_ns!=info['mtime_ns']:
@@ -80,7 +94,13 @@ def main():
     with torch.autocast(device_type=engine.device.type,dtype=engine.dtype,enabled=engine.device.type=='cuda'):
         result=adapter.explain(frame,method=a.method,action_step=a.action_step,
             action_dim=a.action_dim,seed=None,batch_override=batch)
-    out=a.session/'explanations'/f'{name}_{a.method}_step{a.action_step}_dim{a.action_dim}'
+    if a.output_dir:
+        base_dir = a.output_dir / a.session.name if a.output_dir.name != a.session.name else a.output_dir
+    elif (ROOT / 'explanations').is_dir():
+        base_dir = ROOT / 'explanations' / a.session.name
+    else:
+        base_dir = a.session / 'explanations'
+    out = base_dir / f'{name}_{a.method}_step{a.action_step}_dim{a.action_dim}'
     out.mkdir(parents=True,exist_ok=True)
     for cam,heat in result.heat.items():
         np.savez(out/f'{cam}.npz',heat=heat,rgb=frame.rgb[cam],tokens=result.raw['token_maps'][cam])
