@@ -25,6 +25,9 @@ from decord import VideoReader, cpu
 
 from lerobot.policies.pelicanvla05 import PelicanVLA05ProcessorTransformFn
 from lerobot.utils.constants import OBS_IMAGES
+from training.instruction_augmentation import (
+    DynamicCoffeeInstructionAugmenter, CANONICAL_HIGH_LEVEL_TASK, CANONICAL_SUBTASKS, probability,
+)
 
 
 class LeRobotPelicanDataset(Dataset):
@@ -56,6 +59,11 @@ class LeRobotPelicanDataset(Dataset):
         seed: int = 42,
         max_video_readers: int = 6,
         _shared_data: dict | None = None,
+        instruction_augmentation: bool = False,
+        instruction_pool: str | Path | None = None,
+        augmentation_prob: float = 0.5,
+        eval_instruction_level: str = "high_level",
+        subtask_boundary_policy: str = "keep",
     ):
         super().__init__()
         self.root = Path(dataset_root).expanduser().resolve()
@@ -65,6 +73,23 @@ class LeRobotPelicanDataset(Dataset):
         self.pad_dim = pad_dim
         self.use_subtasks_prob = use_subtasks_prob
         self.split = split.lower()
+        self.seed = seed
+        if not 0 <= val_ratio < 1:
+            raise ValueError("val_ratio must be in [0, 1)")
+        self.val_ratio = val_ratio
+        self.augmentation_prob = probability(augmentation_prob, "augmentation_prob")
+        probability(use_subtasks_prob, "use_subtasks_prob")
+        if self.split not in ("train", "val", "all"):
+            raise ValueError(f"Unsupported split: {self.split}")
+        if eval_instruction_level not in ("high_level", "subtask"):
+            raise ValueError("eval_instruction_level must be high_level or subtask")
+        if subtask_boundary_policy not in ("keep", "high_level"):
+            raise ValueError("subtask_boundary_policy must be keep or high_level")
+        if chunk_size < 1:
+            raise ValueError("chunk_size must be positive")
+        self.eval_instruction_level = eval_instruction_level
+        self.subtask_boundary_policy = subtask_boundary_policy
+        self.augmenter = DynamicCoffeeInstructionAugmenter(instruction_pool) if instruction_augmentation else None
 
         # Load info.json
         info_path = self.root / "meta" / "info.json"
@@ -115,6 +140,12 @@ class LeRobotPelicanDataset(Dataset):
             for _, row in df_sub.iterrows():
                 self.subtasks[int(row[idx_col])] = str(row[sub_col])
 
+        if self.augmenter is not None:
+            if self.tasks != {0: CANONICAL_HIGH_LEVEL_TASK}:
+                raise ValueError("Coffee augmentation requires the canonical serving brewed coffee task")
+            if self.subtasks != CANONICAL_SUBTASKS:
+                raise ValueError("Coffee augmentation requires the canonical five subtask labels")
+
         # Load stats
         self.state_mean = None
         self.state_std = None
@@ -141,19 +172,24 @@ class LeRobotPelicanDataset(Dataset):
             raise FileNotFoundError(f"Neither {episodes_parquet} nor {episodes_jsonl} was found.")
 
         # Episode-level train/validation split
+        self.episodes_by_id = {int(ep["episode_index"]): ep for ep in self.episodes}
         total_eps = len(self.episodes)
+        if total_eps == 0 or len(self.episodes_by_id) != total_eps:
+            raise ValueError("Episode metadata must be nonempty with unique IDs")
         if val_ratio > 0.0 and self.split in ["train", "val"]:
             rng = np.random.RandomState(seed)
-            shuffled_eps = rng.permutation(total_eps).tolist()
+            shuffled_eps = rng.permutation(list(self.episodes_by_id)).tolist()
             n_val = max(1, int(round(total_eps * val_ratio)))
+            if n_val >= total_eps:
+                raise ValueError("Validation split leaves no training episodes; reduce val_ratio or use val_ratio=0")
             val_eps_set = set(shuffled_eps[:n_val])
             train_eps_set = set(shuffled_eps[n_val:])
             self.active_episodes_set = val_eps_set if self.split == "val" else train_eps_set
         else:
-            self.active_episodes_set = set(range(total_eps))
+            self.active_episodes_set = set(self.episodes_by_id)
 
         # Load primary data parquet table into memory (or reuse shared cache)
-        if _shared_data is not None:
+        if _shared_data:
             self.raw_states = _shared_data["raw_states"]
             self.raw_actions = _shared_data["raw_actions"]
             self.task_indices = _shared_data["task_indices"]
@@ -180,6 +216,12 @@ class LeRobotPelicanDataset(Dataset):
                 self._use_in_memory_data = False
                 self._parquet_cache = {}
 
+        if self.augmenter is not None and self._use_in_memory_data:
+            if set(np.unique(self.task_indices)) != {0}:
+                raise ValueError("Coffee data contains unsupported task IDs")
+            if self.subtask_indices is not None and not set(np.unique(self.subtask_indices)) <= {-1, 0, 1, 2, 3, 4}:
+                raise ValueError("Coffee data contains unsupported subtask IDs")
+
         # Build index map: list of (global_row_idx, episode_idx, frame_in_ep, ep_len, ep_start_idx)
         self.samples = []
         for ep in self.episodes:
@@ -198,9 +240,56 @@ class LeRobotPelicanDataset(Dataset):
             max_length=max_length,
         )
 
+        if self.augmenter is not None:
+            pool_texts = list(self.augmenter.high_level_pool)
+            for pool in self.augmenter.subtask_pools.values():
+                pool_texts.extend(pool)
+            lengths = [len(self.processor.processor.tokenizer(text, truncation=False).input_ids) for text in pool_texts]
+            if max(lengths) > max_length:
+                raise ValueError(f"Instruction pool needs {max(lengths)} tokens, exceeding max_length={max_length}")
+
         # Cache open video readers: LRU cache key=(cam_name, file_idx) -> VideoReader
         self._video_readers = OrderedDict()
         self.max_video_readers = max_video_readers
+
+    def select_instruction(self, task_idx, subtask_idx, chunk_subtasks=None):
+        if chunk_subtasks is not None and np.any(chunk_subtasks != subtask_idx):
+            subtask_idx = -1
+        if self.augmenter is not None:
+            return self.augmenter.sample_instruction(
+                task_idx=task_idx, subtask_idx=subtask_idx,
+                use_subtasks_prob=self.use_subtasks_prob, split=self.split,
+                augmentation_prob=self.augmentation_prob,
+                eval_instruction_level=self.eval_instruction_level,
+            )
+        task = self.tasks.get(task_idx, "serving brewed coffee")
+        if self.split != "train":
+            return self.subtasks.get(subtask_idx, task) if self.eval_instruction_level == "subtask" else task
+        if subtask_idx in self.subtasks and random.random() < self.use_subtasks_prob:
+            return self.subtasks[subtask_idx]
+        return task
+
+    def save_instruction_config(self, directory):
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        config = {
+            "enabled": self.augmenter is not None,
+            "augmentation_prob": self.augmentation_prob,
+            "use_subtasks_prob": self.use_subtasks_prob,
+            "eval_instruction_level": self.eval_instruction_level,
+            "subtask_boundary_policy": self.subtask_boundary_policy,
+            "seed": self.seed,
+            "dataset_root": str(self.root),
+            "val_ratio": self.val_ratio,
+            "split": self.split,
+            "active_episode_ids": sorted(self.active_episodes_set),
+            "pool_sha256": self.augmenter.pool_sha256 if self.augmenter else None,
+        }
+        if self.augmenter:
+            self.augmenter.save_pool(directory / "coffee_instruction_pool.json")
+        else:
+            (directory / "coffee_instruction_pool.json").unlink(missing_ok=True)
+        (directory / "instruction_augmentation.json").write_text(json.dumps(config, indent=2) + "\n")
 
     def get_shared_data(self) -> dict:
         """Export in-memory arrays to quickly initialize validation dataset without re-reading disks."""
@@ -314,7 +403,7 @@ class LeRobotPelicanDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         global_row_idx, ep_idx, frame_in_ep, ep_len, ep_start_idx = self.samples[idx]
-        ep_dict = self.episodes[ep_idx]
+        ep_dict = self.episodes_by_id[ep_idx]
 
         # 1. State
         if self._use_in_memory_data:
@@ -329,11 +418,12 @@ class LeRobotPelicanDataset(Dataset):
                     "state": np.stack(table["observation.state"].to_numpy()),
                     "action": np.stack(table["action"].to_numpy()),
                     "task_index": table["task_index"].to_numpy(),
+                    "subtask_index": table["subtask_index"].to_numpy() if "subtask_index" in table.column_names else None,
                 }
             ep_data = self._parquet_cache[ep_idx]
             raw_state = ep_data["state"][frame_in_ep]
             task_idx = int(ep_data["task_index"][frame_in_ep])
-            subtask_idx = -1
+            subtask_idx = int(ep_data["subtask_index"][frame_in_ep]) if ep_data["subtask_index"] is not None else -1
 
         if self.state_mean is not None:
             norm_state = (raw_state - self.state_mean) / self.state_std
@@ -370,11 +460,14 @@ class LeRobotPelicanDataset(Dataset):
 
         action_tensor = torch.from_numpy(np.stack(actions)).float()
 
-        # 3. Task text
-        task_text = self.tasks.get(task_idx, "serving brewed coffee")
-        if subtask_idx >= 0 and subtask_idx in self.subtasks:
-            if random.random() < self.use_subtasks_prob:
-                task_text = self.subtasks[subtask_idx]
+        # 3. Instruction selection. Boundary policy is opt-in and never alters actions.
+        chunk_subtasks = None
+        if self.subtask_boundary_policy == "high_level":
+            if self._use_in_memory_data and self.subtask_indices is not None:
+                chunk_subtasks = self.subtask_indices[global_row_idx:min(global_row_idx + self.chunk_size, ep_end_row + 1)]
+            elif not self._use_in_memory_data and ep_data["subtask_index"] is not None:
+                chunk_subtasks = ep_data["subtask_index"][frame_in_ep:min(frame_in_ep + self.chunk_size, ep_len)]
+        task_text = self.select_instruction(task_idx, subtask_idx, chunk_subtasks)
 
         # 4. Images: 3 timestamps [t-delta, t, t+delta] (T=3)
         t_prev_rel = max(0, frame_in_ep - self.future_horizon)

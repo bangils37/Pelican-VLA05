@@ -5,17 +5,18 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-CONDA_ENV_PYTHON="/home/anhnb9/miniconda3/envs/pelican_vla/bin/python"
+CONDA_ENV_PYTHON=${CONDA_ENV_PYTHON:-"/home/anhnb9/miniconda3/envs/pelican_vla/bin/python"}
 
 # Environment Variables
-export COSMOS_TOKENIZER_PATH="$PROJECT_ROOT/pretrained_model/cosmos_tokenizer"
-export QWEN3_VL_PATH="Qwen/Qwen3-VL-4B-Instruct"
-export LD_LIBRARY_PATH="/home/anhnb9/miniconda3/envs/pelican_vla/lib:$LD_LIBRARY_PATH"
+export COSMOS_TOKENIZER_PATH=${COSMOS_TOKENIZER_PATH:-"$PROJECT_ROOT/pretrained_model/cosmos_tokenizer"}
+export QWEN3_VL_PATH=${QWEN3_VL_PATH:-"Qwen/Qwen3-VL-4B-Instruct"}
+PYTHON_ENV_LIB="$(dirname "$(dirname "$CONDA_ENV_PYTHON")")/lib"
+export LD_LIBRARY_PATH="$PYTHON_ENV_LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
 # Configuration
-DATASET_PATH="/home/aitt/data/serving_brewed_coffee_lrb_annotated"
-OUTPUT_DIR="$PROJECT_ROOT/checkpoints/pelican_astri_coffee_full_ft"
+DATASET_PATH=${DATASET_PATH:-"/home/aitt/data/serving_brewed_coffee_clean_374_episodes"}
+OUTPUT_DIR=${OUTPUT_DIR:-"$PROJECT_ROOT/checkpoints/pelican_coffee_augmented"}
 
 # Pretrained model / Checkpoint to continue from
 LATEST_CKPT=$(ls -td "$OUTPUT_DIR"/checkpoint-* 2>/dev/null | head -n1)
@@ -37,7 +38,7 @@ if [ -z "$NUM_GPUS" ]; then
 fi
 
 # Training Hyperparameters
-GPU_ID=${GPU_ID:-0}              # Used when NUM_GPUS=1
+GPU_ID=${GPU_ID:-${CUDA_VISIBLE_DEVICES%%,*}}              # Used when NUM_GPUS=1
 BATCH_SIZE=${BATCH_SIZE:-4}      # Per GPU batch size
 NUM_WORKERS=${NUM_WORKERS:-2}    # DataLoader workers per GPU (memory-safe)
 MAX_VIDEO_READERS=${MAX_VIDEO_READERS:-6} # Max open VideoReaders per worker
@@ -58,7 +59,7 @@ USE_WANDB=${USE_WANDB:-1}        # 1 to enable W&B, 0 to disable
 WANDB_PROJECT=${WANDB_PROJECT:-"astribot_making_coffee"}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-"pelican_vla05_continue_$(date +%Y%m%d_%H%M%S)"}
 
-WANDB_RUN_ID=${WANDB_RUN_ID:-"71zdsisb"}
+WANDB_RUN_ID=${WANDB_RUN_ID:-""}
 
 WANDB_ARGS=""
 if [ "$USE_WANDB" -eq 1 ]; then
@@ -66,6 +67,20 @@ if [ "$USE_WANDB" -eq 1 ]; then
     if [ -n "$WANDB_RUN_ID" ]; then
         WANDB_ARGS="$WANDB_ARGS --wandb_run_id $WANDB_RUN_ID"
     fi
+fi
+
+AUGMENTATION_ARGS=(
+    --augmentation_prob "${AUGMENTATION_PROB:-0.5}"
+    --use_subtasks_prob "${USE_SUBTASKS_PROB:-0.5}"
+    --eval_instruction_level "${EVAL_INSTRUCTION_LEVEL:-high_level}"
+    --subtask_boundary_policy "${SUBTASK_BOUNDARY_POLICY:-keep}"
+    --seed "${SEED:-42}"
+)
+if [ "${INSTRUCTION_AUGMENTATION:-1}" -eq 1 ]; then
+    AUGMENTATION_ARGS+=(--instruction_augmentation)
+fi
+if [ -n "${INSTRUCTION_POOL:-}" ]; then
+    AUGMENTATION_ARGS+=(--instruction_pool "$INSTRUCTION_POOL")
 fi
 
 EXTRA_ARGS=""
@@ -87,18 +102,19 @@ echo "Max Steps:            $MAX_STEPS"
 echo "Save Steps:           $SAVE_STEPS (Keep max $SAVE_TOTAL_LIMIT checkpoints)"
 echo "Learning Rate:        $LR"
 echo "Validation Split:     ${VAL_RATIO} (Eval every ${EVAL_STEPS} steps, ${EVAL_BATCHES} batches)"
-echo "W&B Tracking:         Enabled ($WANDB_PROJECT / $WANDB_RUN_NAME)"
+echo "W&B Tracking:         USE_WANDB=$USE_WANDB ($WANDB_PROJECT / $WANDB_RUN_NAME)"
 echo "=========================================================="
 
 mkdir -p "$OUTPUT_DIR"
 
 if [ "$NUM_GPUS" -gt 1 ]; then
     echo "Running Multi-GPU Distributed Full Fine-Tuning via torchrun ($NUM_GPUS GPUs)..."
-    /home/anhnb9/miniconda3/envs/pelican_vla/bin/torchrun \
+    "$CONDA_ENV_PYTHON" -m torch.distributed.run \
         --nproc_per_node="$NUM_GPUS" \
-        --master_port=29500 \
+        --master_port="${MASTER_PORT:-29500}" \
         "$PROJECT_ROOT/training/train.py" \
         --dataset_path "$DATASET_PATH" \
+        --qwen3_vl_path "$QWEN3_VL_PATH" \
         --pretrained_model_path "$PRETRAINED_MODEL" \
         --cosmos_tokenizer_path "$COSMOS_TOKENIZER_PATH" \
         --output_dir "$OUTPUT_DIR" \
@@ -114,11 +130,12 @@ if [ "$NUM_GPUS" -gt 1 ]; then
         --val_ratio "$VAL_RATIO" \
         --eval_steps "$EVAL_STEPS" \
         --eval_batches "$EVAL_BATCHES" \
-        $WANDB_ARGS $EXTRA_ARGS
+        "${AUGMENTATION_ARGS[@]}" $WANDB_ARGS $EXTRA_ARGS
 else
     echo "Running Single-GPU Full Fine-Tuning on GPU $GPU_ID..."
     CUDA_VISIBLE_DEVICES=$GPU_ID "$CONDA_ENV_PYTHON" "$PROJECT_ROOT/training/train.py" \
         --dataset_path "$DATASET_PATH" \
+        --qwen3_vl_path "$QWEN3_VL_PATH" \
         --pretrained_model_path "$PRETRAINED_MODEL" \
         --cosmos_tokenizer_path "$COSMOS_TOKENIZER_PATH" \
         --output_dir "$OUTPUT_DIR" \
@@ -134,5 +151,5 @@ else
         --val_ratio "$VAL_RATIO" \
         --eval_steps "$EVAL_STEPS" \
         --eval_batches "$EVAL_BATCHES" \
-        $WANDB_ARGS $EXTRA_ARGS
+        "${AUGMENTATION_ARGS[@]}" $WANDB_ARGS $EXTRA_ARGS
 fi

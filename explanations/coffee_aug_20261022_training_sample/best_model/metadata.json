@@ -1,0 +1,64 @@
+{
+  "method": "rollout",
+  "seed": 42,
+  "action_step": 0,
+  "attribution_scope": "language_decoder_image_tokens",
+  "temporal_input": "dataset_training_t_minus15_t_t_plus15",
+  "checkpoint": "/home/anhnb9/Documents/Pelican-VLA05/checkpoints/coffee_aug_20261020_2gpu/best_model",
+  "slots": 32,
+  "denoise_selection": "last",
+  "camera_order": [
+    "cam_head",
+    "cam_left_wrist",
+    "cam_right_wrist"
+  ],
+  "preprocessing": "Exact training Dataset tensors, 224x224 direct resize; no repeated-frame or letterbox substitution",
+  "sample": {
+    "dataset": "/home/aitt/data/serving_brewed_coffee_clean_374_episodes",
+    "split": "train",
+    "dataset_index": 842,
+    "global_row": 2523,
+    "episode": 1,
+    "frame": 842,
+    "episode_length": 2006,
+    "subtask_index": 2,
+    "instruction": "serving brewed coffee",
+    "temporal_offsets": [
+      -15,
+      0,
+      15
+    ],
+    "chunk_size": 50,
+    "seed": 42,
+    "action_step": 0,
+    "preprocessing": "Exact training Dataset tensors, 224x224 direct resize; no repeated-frame or letterbox substitution",
+    "batch_sha256": "e6eea63ec5fda5803a9ea8ce03360a748d553a8e579273370bca3c5bb5c812e0",
+    "checkpoint_paths": [
+      "/home/anhnb9/Documents/Pelican-VLA05/checkpoints/coffee_aug_20261020_2gpu/best_model",
+      "/home/anhnb9/Documents/Pelican-VLA05/checkpoints/coffee_aug_20261020_2gpu/checkpoint-076250"
+    ]
+  },
+  "metrics": {
+    "normalized_action_mse": 0.02663220837712288,
+    "normalized_action_mae": 0.1004750058054924,
+    "normalized_mse_per_joint": [
+      0.0006625324604101479,
+      0.002425519283860922,
+      0.0012006249744445086,
+      0.0004232494393363595,
+      0.0006179257179610431,
+      0.002805778058245778,
+      0.002437017625197768,
+      0.013498085550963879,
+      0.017688743770122528,
+      0.07881717383861542,
+      0.08259600400924683,
+      0.025416024029254913,
+      0.14481431245803833,
+      0.05043504387140274,
+      0.0007119349320419133,
+      0.0015653637237846851
+    ]
+  },
+  "caveat": "Decoder image-token attention at action step 0, last denoising call; not causal attribution or a full temporal/vision-encoder explanation."
+}

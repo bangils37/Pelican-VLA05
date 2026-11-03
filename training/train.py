@@ -20,6 +20,7 @@ from pathlib import Path
 import sys
 import os
 import re
+import random
 
 import numpy as np
 import torch
@@ -90,6 +91,13 @@ def parse_args():
         default="Qwen/Qwen3-VL-4B-Instruct",
         help="Local dir or HF id for Qwen3-VL weights",
     )
+    parser.add_argument("--instruction_augmentation", action="store_true", help="Enable curated coffee paraphrases")
+    parser.add_argument("--instruction_pool", type=str, default=None, help="Reviewed JSON pool; defaults to bundled coffee pool")
+    parser.add_argument("--augmentation_prob", type=float, default=0.5, help="Paraphrase probability after choosing instruction level")
+    parser.add_argument("--use_subtasks_prob", type=float, default=0.5)
+    parser.add_argument("--eval_instruction_level", choices=["high_level", "subtask"], default="high_level")
+    parser.add_argument("--subtask_boundary_policy", choices=["keep", "high_level"], default="keep")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_size", type=int, default=4, help="Batch size per GPU")
     parser.add_argument("--num_workers", type=int, default=2, help="DataLoader workers per GPU")
     parser.add_argument("--max_video_readers", type=int, default=6, help="Max open VideoReader instances per DataLoader worker")
@@ -144,6 +152,7 @@ def save_checkpoint(
         save_dir = output_dir / f"checkpoint-{step:06d}"
         save_dir.mkdir(parents=True, exist_ok=True)
         unwrapped.save_pretrained(str(save_dir))
+        dataset.save_instruction_config(save_dir)
         cfg_path = save_dir / "config.json"
         if cfg_path.is_file():
             with open(cfg_path, "r", encoding="utf-8") as f:
@@ -180,6 +189,7 @@ def save_checkpoint(
         best_dir = output_dir / "best_model"
         best_dir.mkdir(parents=True, exist_ok=True)
         unwrapped.save_pretrained(str(best_dir))
+        dataset.save_instruction_config(best_dir)
         cfg_path = best_dir / "config.json"
         if cfg_path.is_file():
             with open(cfg_path, "r", encoding="utf-8") as f:
@@ -300,6 +310,9 @@ def evaluate(
 def main():
     args = parse_args()
     rank, world_size, local_rank, is_distributed = setup_distributed()
+    random.seed(args.seed + rank)
+    np.random.seed(args.seed + rank)
+    torch.manual_seed(args.seed + rank)
     is_main_process = (rank == 0)
 
     # Configure logging
@@ -338,6 +351,13 @@ def main():
         split="train",
         val_ratio=args.val_ratio,
         max_video_readers=args.max_video_readers,
+        instruction_augmentation=args.instruction_augmentation,
+        instruction_pool=args.instruction_pool,
+        augmentation_prob=args.augmentation_prob,
+        use_subtasks_prob=args.use_subtasks_prob,
+        eval_instruction_level=args.eval_instruction_level,
+        subtask_boundary_policy=args.subtask_boundary_policy,
+        seed=args.seed,
     )
     val_dataset = LeRobotPelicanDataset(
         dataset_root=args.dataset_path,
@@ -348,10 +368,21 @@ def main():
         split="val",
         val_ratio=args.val_ratio,
         max_video_readers=args.max_video_readers,
+        instruction_augmentation=args.instruction_augmentation,
+        instruction_pool=args.instruction_pool,
+        augmentation_prob=args.augmentation_prob,
+        use_subtasks_prob=args.use_subtasks_prob,
+        eval_instruction_level=args.eval_instruction_level,
+        subtask_boundary_policy=args.subtask_boundary_policy,
+        seed=args.seed,
         _shared_data=train_dataset.get_shared_data(),
     )
 
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True) if is_distributed else None
+    if is_main_process:
+        train_dataset.save_instruction_config(output_dir)
+        logging.info("Instruction augmentation: %s", train_dataset.augmenter.stats() if train_dataset.augmenter else "disabled")
+
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=args.seed) if is_distributed else None
     train_dataloader = DataLoader(
         train_dataset,
         batch_size=args.batch_size,
@@ -361,6 +392,7 @@ def main():
         collate_fn=collate_pelican_batch,
         pin_memory=True,
         drop_last=True,
+        generator=torch.Generator().manual_seed(args.seed + rank),
     )
 
     val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False) if is_distributed else None
@@ -373,6 +405,7 @@ def main():
         collate_fn=collate_pelican_batch,
         pin_memory=True,
         drop_last=False,
+        generator=torch.Generator().manual_seed(args.seed + rank + 100000),
     )
 
     if is_main_process:

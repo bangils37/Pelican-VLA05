@@ -1,0 +1,76 @@
+{
+  "high_level": [
+    "serving brewed coffee",
+    "Serve brewed coffee.",
+    "Please serve the brewed coffee.",
+    "Could you serve the brewed coffee?",
+    "Complete the coffee serving task.",
+    "Carry out the brewed coffee serving routine.",
+    "Serve brewed coffee using the coffee pourer and wooden serving tray."
+  ],
+  "subtasks": {
+    "0": [
+      "Pick a cup and place it on the wooden serving tray",
+      "Pick up the cup and place it on the wooden serving tray.",
+      "Please pick up the cup and place it on the wooden serving tray.",
+      "Lift the cup and set it down on the wooden serving tray.",
+      "Please lift the cup and set it down on the wooden serving tray.",
+      "Grasp the cup and transfer it onto the wooden serving tray.",
+      "Please grasp the cup and transfer it onto the wooden serving tray."
+    ],
+    "1": [
+      "(OPTIONAL) Re-align the coffee pourer for easier grasp",
+      "Re-align the coffee pourer for easier grasp.",
+      "Please re-align the coffee pourer for easier grasp.",
+      "Re-align the coffee carafe for easier grasp.",
+      "Please re-align the coffee carafe for easier grasp.",
+      "Adjust the coffee pourer so it is easier to grasp.",
+      "Please adjust the coffee pourer so it is easier to grasp.",
+      "Adjust the coffee carafe so it is easier to grasp.",
+      "Please adjust the coffee carafe so it is easier to grasp.",
+      "Reposition the coffee pourer for a better grasp.",
+      "Please reposition the coffee pourer for a better grasp.",
+      "Reposition the coffee carafe for a better grasp.",
+      "Please reposition the coffee carafe for a better grasp."
+    ],
+    "2": [
+      "Pick the coffee pourer and pour a shot to the cup",
+      "Pick up the coffee pourer and pour a shot of coffee into the cup.",
+      "Please pick up the coffee pourer and pour a shot of coffee into the cup.",
+      "Pick up the coffee carafe and pour a shot of coffee into the cup.",
+      "Please pick up the coffee carafe and pour a shot of coffee into the cup.",
+      "Lift the coffee pourer and pour a shot into the cup.",
+      "Please lift the coffee pourer and pour a shot into the cup.",
+      "Lift the coffee carafe and pour a shot into the cup.",
+      "Please lift the coffee carafe and pour a shot into the cup.",
+      "Grasp the coffee pourer and pour a shot of coffee into the cup.",
+      "Please grasp the coffee pourer and pour a shot of coffee into the cup.",
+      "Grasp the coffee carafe and pour a shot of coffee into the cup.",
+      "Please grasp the coffee carafe and pour a shot of coffee into the cup."
+    ],
+    "3": [
+      "Place the coffee pourer back the original place",
+      "Place the coffee pourer back in its original location.",
+      "Please place the coffee pourer back in its original location.",
+      "Place the coffee carafe back in its original location.",
+      "Please place the coffee carafe back in its original location.",
+      "Return the coffee pourer to where it was before.",
+      "Please return the coffee pourer to where it was before.",
+      "Return the coffee carafe to where it was before.",
+      "Please return the coffee carafe to where it was before.",
+      "Set the coffee pourer down at its original spot.",
+      "Please set the coffee pourer down at its original spot.",
+      "Set the coffee carafe down at its original spot.",
+      "Please set the coffee carafe down at its original spot."
+    ],
+    "4": [
+      "Pick the cup and place to the other side of the wooden serving tray",
+      "Pick up the cup and place it on the other side of the wooden serving tray.",
+      "Please pick up the cup and place it on the other side of the wooden serving tray.",
+      "Lift the cup and set it down on the opposite side of the wooden serving tray.",
+      "Please lift the cup and set it down on the opposite side of the wooden serving tray.",
+      "Grasp the cup and transfer it to the other side of the wooden serving tray.",
+      "Please grasp the cup and transfer it to the other side of the wooden serving tray."
+    ]
+  }
+}

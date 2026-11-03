@@ -1,0 +1,25 @@
+{
+  "dataset": "/home/aitt/data/serving_brewed_coffee_clean_374_episodes",
+  "split": "train",
+  "dataset_index": 842,
+  "global_row": 2523,
+  "episode": 1,
+  "frame": 842,
+  "episode_length": 2006,
+  "subtask_index": 2,
+  "instruction": "serving brewed coffee",
+  "temporal_offsets": [
+    -15,
+    0,
+    15
+  ],
+  "chunk_size": 50,
+  "seed": 42,
+  "action_step": 0,
+  "preprocessing": "Exact training Dataset tensors, 224x224 direct resize; no repeated-frame or letterbox substitution",
+  "batch_sha256": "e6eea63ec5fda5803a9ea8ce03360a748d553a8e579273370bca3c5bb5c812e0",
+  "checkpoint_paths": [
+    "/home/anhnb9/Documents/Pelican-VLA05/checkpoints/coffee_aug_20261020_2gpu/best_model",
+    "/home/anhnb9/Documents/Pelican-VLA05/checkpoints/coffee_aug_20261020_2gpu/checkpoint-076250"
+  ]
+}
